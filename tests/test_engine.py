@@ -246,6 +246,98 @@ def test_full_atmosphere_ethane_accumulation():
     check("some ozone actually formed", any(k.startswith("ozone_formation:") for k in result.reaction_fire_counts))
 
 
+def test_water_photolysis_and_escape_reaction_generation():
+    reactions = generate_reactions_for_species(
+        "H2O", MOLECULAR_H2O, {}, max_carbon=6,
+        k_photo=1.0, k_comb=1.0, k_abstr=1.0, k_photo_h2o=0.7,
+    )
+    photo = [r for r in reactions if r.kind == "photolysis"]
+    check("H2O alone yields exactly one photolysis reaction", len(photo) == 1)
+    check("H2O photolysis uses k_photo_h2o", photo[0].rate_constant == 0.7)
+    check("H2O photolysis products are H* + OH*",
+          sorted(p.formula() for p in photo[0].products) == ["H•", "OH•"])
+
+    h2_reactions = generate_reactions_for_species(
+        "H2", MOLECULAR_H2, {}, max_carbon=6,
+        k_photo=1.0, k_comb=1.0, k_abstr=1.0, k_escape_h2=2.5,
+    )
+    escape = [r for r in h2_reactions if r.kind == "escape"]
+    check("H2 alone yields exactly one escape reaction", len(escape) == 1)
+    check("H2 escape uses k_escape_h2", escape[0].rate_constant == 2.5)
+    check("H2 escape has no products (irreversible sink)", escape[0].products == ())
+
+    h_reactions = generate_reactions_for_species(
+        "H", ATOMIC_H, {}, max_carbon=6,
+        k_photo=1.0, k_comb=1.0, k_abstr=1.0, k_escape_h=1.5,
+    )
+    escape_h = [r for r in h_reactions if r.kind == "escape"]
+    check("H* alone yields exactly one escape reaction", len(escape_h) == 1)
+    check("H* escape uses k_escape_h", escape_h[0].rate_constant == 1.5)
+
+    oh_reactions = generate_reactions_for_species(
+        "OH", HYDROXYL_OH, {}, max_carbon=6,
+        k_photo=1.0, k_comb=1.0, k_abstr=1.0, k_oh_disprop=3.0,
+    )
+    disprop = [r for r in oh_reactions if r.kind == "oh_disproportionation"]
+    check("OH* alone yields exactly one disproportionation reaction", len(disprop) == 1)
+    check("OH disproportionation is a true self-pair (OH + OH)", disprop[0].reactant_ids == ("OH", "OH"))
+    check("OH disproportionation uses k_oh_disprop", disprop[0].rate_constant == 3.0)
+    check("2 OH* -> H2O + O*", sorted(p.formula() for p in disprop[0].products) == ["H2O", "O•"])
+
+
+def test_escape_is_an_irreversible_sink():
+    """With escape active and nothing else happening, H2 count should just
+    drain away with no compensating species appearing anywhere."""
+    params = SimParams(k_photo=0.0, k_comb=0.0, k_abstr=0.0, k_photo_h2o=0.0,
+                        k_escape_h2=5.0, max_carbon=4, t_max=50.0, max_events=2000,
+                        sample_every=10, seed=1)
+    sim = Simulator(params)
+    sim.seed_species(MOLECULAR_H2, 200)
+    result = sim.run()
+    check("H2 count dropped via escape", result.counts.get("H2", 0) < 200)
+    check("only H2 and its escape reaction exist (no compensating species)",
+          set(result.species.keys()) == {"H2"})
+    check("escape events actually fired", any(k.startswith("escape:H2") for k in result.reaction_fire_counts))
+
+
+def test_wet_planet_o2_buildup_needs_hydrogen_escape():
+    """The central question: on a wet planet (CH4 + H2O), does UV alone build
+    up enough O2/O3 to strangle hydrocarbon chemistry? Real planetary science
+    says this requires hydrogen ESCAPE (an irreversible sink) -- without it,
+    every O atom pulled off H2O eventually finds its way back via abstraction
+    /combination, and the system just cycles. Test both conditions."""
+
+    def run(k_escape):
+        params = SimParams(
+            k_photo=0.05, k_comb=5.0, k_abstr=0.5, k_photo_h2o=0.05,
+            k_escape_h2=k_escape, k_escape_h=k_escape,
+            max_carbon=4, t_max=60.0, max_events=800_000, sample_every=1000, seed=13,
+        )  # the O2/O3 rate constants stay at their SimParams defaults; k_photo_h2o
+        # bumped up from its (deliberately weak, realistic) default so this test
+        # converges within a reasonable event budget rather than testing patience
+        sim = Simulator(params)
+        sim.seed_species(methane(), 300)
+        sim.seed_species(MOLECULAR_H2O, 300)
+        result = sim.run()
+        check(f"run reached t_max (k_escape={k_escape})", result.stopped_reason == "t_max reached")
+        o2_now = result.counts.get("O2", 0)
+        o3_now = result.counts.get("O3", 0)
+        comb_fires = sum(n for k, n in result.reaction_fire_counts.items() if k.startswith("combination:"))
+        scav_fires = sum(n for k, n in result.reaction_fire_counts.items()
+                          if k.startswith("o2_scavenging:") or k.startswith("ozone_scavenging:"))
+        return o2_now, o3_now, comb_fires, scav_fires
+
+    o2_closed, o3_closed, comb_closed, scav_closed = run(k_escape=0.0)
+    o2_open, o3_open, comb_open, scav_open = run(k_escape=2.0)
+    print(f"  -> no escape:     O2={o2_closed} O3={o3_closed} self-comb={comb_closed} scavenging={scav_closed}")
+    print(f"  -> with escape:   O2={o2_open} O3={o3_open} self-comb={comb_open} scavenging={scav_open}")
+
+    check("hydrogen escape leads to more free O2 than a closed (no-escape) system",
+          o2_open + o3_open > o2_closed + o3_closed)
+    check("without escape, O2/O3 scavenging does not dominate hydrocarbon self-combination",
+          scav_closed <= comb_closed * 3)
+
+
 def test_chain_length_stats_basic():
     from engine.molecule import Molecule as _Molecule
 
@@ -295,6 +387,9 @@ if __name__ == "__main__":
     test_o2_competes_with_self_combination_for_c2h6()
     test_ozone_formation_photolysis_and_scavenging()
     test_full_atmosphere_ethane_accumulation()
+    test_water_photolysis_and_escape_reaction_generation()
+    test_escape_is_an_irreversible_sink()
+    test_wet_planet_o2_buildup_needs_hydrogen_escape()
     test_chain_length_stats_basic()
     test_higher_uv_yields_longer_chains_at_fixed_time()
     print("\nAll sanity checks passed.")

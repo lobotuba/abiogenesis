@@ -709,4 +709,5 @@ ATMOSPHERIC_GASES = {
     "O2": lambda: MOLECULAR_O2,
     "CO2": lambda: MOLECULAR_CO2,
     "Ar": lambda: ATOMIC_AR,
+    "H2O": lambda: MOLECULAR_H2O,
 }

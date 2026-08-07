@@ -29,6 +29,11 @@ class SimParams:
     k_o3_formation: float = 5.0  # O* + O2 -> O3 rate constant (near diffusion-limited, like k_comb)
     k_photo_o3: float = 0.08     # O3 -> O2 + O* photolysis rate constant (weaker bond than O2, so higher than k_photo_o2)
     k_o3_scavenge: float = 8.0   # R* + O3 -> RO* + O2; ozone reacts with radicals faster than O2 does in reality
+    k_photo_h2o: float = 0.004   # H2O -> H* + OH* photolysis rate constant (weak absorber, needs harder UV than O2/CO2)
+    k_oh_disprop: float = 2.0    # OH* + OH* -> H2O + O*; the secondary step that lets water photolysis
+                                  # bootstrap free O2/O3 without any O2 present to begin with
+    k_escape_h2: float = 0.0     # H2 -> escapes to space (irreversible sink); off by default, opt-in
+    k_escape_h: float = 0.0      # H* -> escapes to space (irreversible sink); off by default, opt-in
     max_carbon: int = 6        # complexity ceiling: cap on carbons per molecule
     t_max: float = 500.0
     max_events: int = 200_000
@@ -75,6 +80,10 @@ class Simulator:
                 k_o3_formation=self.p.k_o3_formation,
                 k_photo_o3=self.p.k_photo_o3,
                 k_o3_scavenge=self.p.k_o3_scavenge,
+                k_photo_h2o=self.p.k_photo_h2o,
+                k_oh_disprop=self.p.k_oh_disprop,
+                k_escape_h2=self.p.k_escape_h2,
+                k_escape_h=self.p.k_escape_h,
             )
             for r in new_reactions:
                 self.reactions.setdefault(r.key, r)

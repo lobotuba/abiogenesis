@@ -21,17 +21,19 @@ st.set_page_config(page_title="Abiogenesis: hydrocarbon photochemistry", layout=
 st.title("Methane photochemistry -> reaction-network complexity")
 st.caption(
     "CH4 + UV -> CH3• + H•, then radical combination and H-abstraction let the "
-    "network grow on its own. Add N2/O2/CO2/Ar to test the central question: does "
-    "the C2H6 that forms actually *accumulate*, or does O2 outcompete radical "
-    "self-combination and divert it into oxidized products instead? This is a "
-    "toy, non-calibrated model -- see README for what it does and doesn't capture."
+    "network grow on its own. Add N2/O2/CO2/Ar/H2O to test the central question: does "
+    "the C2H6 that forms actually *accumulate*, or does O2 (direct, or self-generated from "
+    "water photolysis) outcompete radical self-combination and divert it into oxidized "
+    "products instead? This is a toy, non-calibrated model -- see README for what it does "
+    "and doesn't capture."
 )
 
 ATMOSPHERE_PRESETS = {
-    "Pure methane (baseline, no O2/N2/CO2/Ar)": dict(n2=0, o2=0, co2=0, ar=0),
-    "Reducing, early-Earth-like (trace O2)": dict(n2=200, o2=5, co2=20, ar=5),
-    "Modern oxidizing atmosphere (O2-rich)": dict(n2=780, o2=210, co2=4, ar=10),
-    "Custom": dict(n2=0, o2=0, co2=0, ar=0),
+    "Pure methane (baseline, no atmosphere)": dict(n2=0, o2=0, co2=0, ar=0, h2o=0),
+    "Reducing, early-Earth-like (trace O2)": dict(n2=200, o2=5, co2=20, ar=5, h2o=0),
+    "Modern oxidizing atmosphere (O2-rich)": dict(n2=780, o2=210, co2=4, ar=10, h2o=0),
+    "Wet planet, no free O2 (water photolysis only)": dict(n2=0, o2=0, co2=0, ar=0, h2o=300),
+    "Custom": dict(n2=0, o2=0, co2=0, ar=0, h2o=0),
 }
 
 with st.sidebar:
@@ -46,12 +48,30 @@ with st.sidebar:
     o2_count = st.slider("O2 count", 0, 2000, defaults["o2"], step=10, key=f"o2_{preset_name}")
     co2_count = st.slider("CO2 count", 0, 500, defaults["co2"], step=5, key=f"co2_{preset_name}")
     ar_count = st.slider("Ar count", 0, 500, defaults["ar"], step=5, key=f"ar_{preset_name}")
+    h2o_count = st.slider("H2O count (a 'wet planet')", 0, 2000, defaults["h2o"], step=10, key=f"h2o_{preset_name}")
     st.caption(
         "N2 and Ar never react in this model (accurately: N2's triple bond needs far "
         "harder UV than this sim implies; Ar is a noble gas). O2 and CO2 photolyze; O2 "
         "additionally *scavenges* hydrocarbon radicals directly, and separately builds up "
         "O3 (ozone) with UV-generated O atoms -- O3 is itself highly reactive and scavenges "
-        "radicals too. See the callout below the run for how this plays out."
+        "radicals too. H2O also photolyzes (H2O -> H* + OH*); two OH* can disproportionate "
+        "into H2O + O*, which is how a wet planet can bootstrap its *own* O2/O3 from water "
+        "alone, no free O2 required. See the callout below the run for how this plays out."
+    )
+
+    st.header("Hydrogen escape")
+    k_escape = st.slider(
+        "H2 / H* escape rate to space (k_escape)", 0.0, 20.0, 0.0, step=0.1,
+        help="Off (0) by default: a closed system just cycles oxygen back into water and "
+             "never builds up free O2/O3, no matter how much UV or how much time. Turning "
+             "escape on gives the system a one-way loss of hydrogen -- the real mechanism "
+             "proposed for abiotic O2/O3 buildup on a wet planet with no biology at all.",
+    )
+    st.caption(
+        "Applies equally to H2 and H* (both escape in this simplified model). In testing, "
+        "even a nonzero escape rate only produces a modest, self-limited O2/O3 steady state "
+        "(ozone's own photolysis balances its formation) unless escape and/or water-photolysis "
+        "rates are pushed well above realistic values -- see README."
     )
 
     st.header("Rate constants (relative units)")
@@ -72,6 +92,16 @@ with st.sidebar:
         help="Ozone is set to react with radicals a bit faster than O2 by default, matching "
              "how reactive O3 actually is toward radical species in real atmospheric chemistry.",
     )
+    k_photo_h2o = st.slider(
+        "UV photolysis, H2O (k_photo_h2o)", 0.0, 1.0, 0.004, step=0.001, format="%.3f",
+        help="Water is a weak UV absorber -- needs harder UV than O2/CO2 in reality, so this "
+             "defaults low. Raise it to see the wet-planet mechanism proceed faster.",
+    )
+    k_oh_disprop = st.slider(
+        "OH* + OH* -> H2O + O* (k_oh_disprop)", 0.0, 20.0, 2.0, step=0.1,
+        help="The secondary step that lets water photolysis bootstrap free O atoms (and "
+             "hence O2/O3) without any O2 present to begin with.",
+    )
 
     st.header("Complexity & run length")
     max_carbon = st.slider("Max carbons per molecule (complexity ceiling)", 2, 10, 6)
@@ -88,12 +118,15 @@ if run_clicked:
         k_photo=k_photo, k_comb=k_comb, k_abstr=k_abstr,
         k_photo_o2=k_photo_o2, k_photo_co2=k_photo_co2, k_o2_scavenge=k_o2_scavenge,
         k_o3_formation=k_o3_formation, k_photo_o3=k_photo_o3, k_o3_scavenge=k_o3_scavenge,
+        k_photo_h2o=k_photo_h2o, k_oh_disprop=k_oh_disprop,
+        k_escape_h2=k_escape, k_escape_h=k_escape,
         max_carbon=max_carbon, t_max=t_max, max_events=max_events,
         sample_every=max(1, max_events // 500), seed=int(seed),
     )
     sim = Simulator(params)
     sim.seed_species(SEED_MOLECULES[seed_name](), seed_count)
-    for gas_name, count in [("N2", n2_count), ("O2", o2_count), ("CO2", co2_count), ("Ar", ar_count)]:
+    for gas_name, count in [("N2", n2_count), ("O2", o2_count), ("CO2", co2_count),
+                             ("Ar", ar_count), ("H2O", h2o_count)]:
         if count > 0:
             sim.seed_species(ATMOSPHERIC_GASES[gas_name](), count)
     with st.spinner("Running Gillespie simulation..."):
@@ -136,8 +169,22 @@ ec2.metric("O2 + O3 scavenging events fired", scav_fires, help=f"O2: {o2_scav_fi
 ec3.metric("O3 (ozone) now", o3_now)
 ec4.metric("C2H6 now / peak", f"{c2h6_now} / {c2h6_peak}")
 
-if o2_count == 0:
-    st.info("No O2 in this run -- self-combination has no competition, so any C2H6 formed just accumulates.")
+o2_now = result.counts.get("O2", 0)
+oxidizer_present = o2_count > 0 or o2_now > 0 or o3_now > 0
+
+if h2o_count > 0 and o2_count == 0 and k_escape == 0.0:
+    st.success(
+        f"**Wet planet, closed system**: {o2_now} O2 / {o3_now} O3 despite water photolysis "
+        f"being active -- with hydrogen escape off, every O atom pulled off H2O finds its way "
+        f"back into H2O via this same radical chemistry, so no free oxidant can persist. "
+        f"Self-combination proceeds essentially unopposed ({comb_fires} events, {scav_fires} scavenging). "
+        f"Turn on hydrogen escape (sidebar) to let this system actually build up an oxidizing atmosphere."
+    )
+elif not oxidizer_present:
+    st.info(
+        "No O2 (direct or water-generated) in this run -- self-combination has no "
+        "competition, so any C2H6 formed just accumulates."
+    )
 elif scav_fires > comb_fires * 3:
     st.warning(
         f"**O2/O3 win this competition** ({scav_fires} scavenging events -- {o2_scav_fires} direct O2, "

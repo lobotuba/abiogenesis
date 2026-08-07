@@ -10,6 +10,32 @@ produce all candidate elementary reactions:
   4. O2 scavenging         R* + O2 -> ROO*                   (radical trapped by O2)
   5. Ozone formation        O* + O2 -> O3                      (fixed pair)
   6. Ozone scavenging        R* + O3 -> RO* + O2                (radical trapped by O3)
+  7. Escape                   H2 -> (nothing) / H* -> (nothing)   (irreversible loss to space)
+  8. OH disproportionation     OH* + OH* -> H2O + O*                (fixed self-pair)
+
+H2O also gets a fixed unimolecular photolysis reaction (H2O -> H* + OH*,
+rule 1c below), the real mechanism by which a wet planet's own atmospheric
+water can be a *source* of O atoms/O2/O3 with no biology or hydrocarbons
+involved at all. On its own, though, H2O photolysis's *primary* products
+(H* and OH*) have no path to free O2/O3 -- something has to convert OH*
+into an O atom first. Rule 8 is that missing link: two OH radicals meeting
+and disproportionating into H2O + O* is a real, well-known secondary step,
+and it's what lets water photolysis bootstrap O2/O3 production without any
+O2 seeded beforehand. (This model doesn't go further into full HOx
+chemistry -- no H2O2/HO2 -- rule 8 is the one secondary step needed to
+answer "can a wet planet make its own O2 from UV alone.")
+
+Rule 7 (escape) is what makes *sustained* O2/O3 buildup possible: without
+some one-way loss of hydrogen, every O atom liberated from H2O eventually
+finds its way back into H2O via the same radical chemistry (abstraction,
+combination), and the system just cycles at a steady state instead of
+trending toward net oxidation. Real planetary atmospheres do lose hydrogen
+to space (it's the lightest gas), which is the accepted mechanism for
+abiotic O2/O3 buildup on a wet planet with no life -- studied as a "false
+positive" biosignature scenario for exoplanets. Escape is modeled as a
+simple first-order sink (no altitude/exobase physics) so the sweep tool can
+ask directly: at what escape rate does O2/O3 buildup start to dominate
+hydrocarbon chemistry?
 
 Rule (3) is what lets the network self-amplify: a radical can be regenerated
 by a different chain a few steps later, which is the chemically real analog
@@ -42,7 +68,9 @@ from .molecule import (
     ATOMIC_H,
     ATOMIC_O,
     AlkoxyRadical,
+    HYDROXYL_OH,
     MOLECULAR_CO,
+    MOLECULAR_H2O,
     MOLECULAR_O2,
     MOLECULAR_O3,
     Molecule,
@@ -53,7 +81,7 @@ from .molecule import (
 
 ReactionKind = Literal[
     "photolysis", "combination", "abstraction",
-    "o2_scavenging", "ozone_formation", "ozone_scavenging",
+    "o2_scavenging", "ozone_formation", "ozone_scavenging", "escape", "oh_disproportionation",
 ]
 
 
@@ -120,6 +148,10 @@ def generate_reactions_for_species(
     k_o3_formation: float = 0.0,
     k_photo_o3: float = 0.0,
     k_o3_scavenge: float = 0.0,
+    k_photo_h2o: float = 0.0,
+    k_escape_h2: float = 0.0,
+    k_escape_h: float = 0.0,
+    k_oh_disprop: float = 0.0,
 ) -> list[Reaction]:
     """Generate all new reactions enabled by `new_species` joining the pool.
 
@@ -168,6 +200,42 @@ def generate_reactions_for_species(
             kind="photolysis", reactant_ids=(new_id,), products=products,
             rate_constant=k_photo_o3, weight=1.0,
             key=_mk_key("photolysis", (new_id,), tuple(p.canonical_id() for p in products)),
+        ))
+    if new_id == "H2O":
+        products = (ATOMIC_H, HYDROXYL_OH)
+        out.append(Reaction(
+            kind="photolysis", reactant_ids=(new_id,), products=products,
+            rate_constant=k_photo_h2o, weight=1.0,
+            key=_mk_key("photolysis", (new_id,), tuple(p.canonical_id() for p in products)),
+        ))
+
+    # 8. OH disproportionation: OH* + OH* -> H2O + O*. A fixed self-pair
+    #    (both reactants are the same species), generated once when OH is
+    #    first discovered -- no bidirectional pool-checking needed since
+    #    there's no second species to wait on.
+    if new_id == "OH":
+        reactants = ("OH", "OH")
+        products = (MOLECULAR_H2O, ATOMIC_O)
+        out.append(Reaction(
+            kind="oh_disproportionation", reactant_ids=reactants, products=products,
+            rate_constant=k_oh_disprop, weight=1.0,
+            key=_mk_key("oh_disproportionation", reactants, tuple(p.canonical_id() for p in products)),
+        ))
+
+    # 7. Escape: H2 and H* are the lightest species in the system and the
+    #    ones real planetary atmospheres actually lose to space. Modeled as
+    #    unimolecular decay to nothing (empty products) -- an irreversible
+    #    sink, unlike every other reaction here which just reshuffles atoms
+    #    among tracked species.
+    if new_id == "H2":
+        out.append(Reaction(
+            kind="escape", reactant_ids=("H2",), products=(),
+            rate_constant=k_escape_h2, weight=1.0, key=_mk_key("escape", ("H2",), ()),
+        ))
+    if new_id == "H":
+        out.append(Reaction(
+            kind="escape", reactant_ids=("H",), products=(),
+            rate_constant=k_escape_h, weight=1.0, key=_mk_key("escape", ("H",), ()),
         ))
 
     # 2. Combination: new_species (if a radical) with every radical in the

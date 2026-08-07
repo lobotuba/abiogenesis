@@ -88,6 +88,83 @@ hydrocarbon fragment with a fixed O-group rather than full graph
 molecules -- no further oxidation is modeled past that first O-addition
 step (see Limitations).
 
+## Water photolysis, hydrogen escape, and abiotic O2
+
+A wet planet doesn't need free O2 seeded to start building its own: H2O
+photolyzes too (`H2O + hv -> H* + OH*`). On its own this goes nowhere --
+the primary products have no path back to O2/O3 -- so a second real
+reaction is included: **`OH* + OH* -> H2O + O*`** (hydroxyl
+disproportionation), the secondary step that actually bootstraps a free O
+atom out of pure water photochemistry. From there the existing O2/O3
+machinery (see above) takes over.
+
+**But a closed system never builds up any free O2/O3 at all**, no matter
+how much UV or how much simulated time -- confirmed in testing out to
+1000+ time units and nearly a million reaction events: every O atom
+liberated from H2O finds its way back into H2O via the same radical
+chemistry (abstraction, combination). This matches real planetary
+chemistry: the process needs a one-way loss of hydrogen to actually leave
+oxygen behind, since hydrogen is the lightest gas and the one real
+atmospheres actually lose to space. That's modeled here as **hydrogen
+escape** -- `H2 -> (nothing)` and `H* -> (nothing)`, a simple first-order
+sink with no altitude/exobase physics, off by default (opt-in via the
+sidebar's `k_escape` slider). This is the accepted mechanism proposed for
+*abiotic* O2/O3 buildup on a wet, lifeless planet -- studied in the
+literature as a potential "false positive" biosignature for exoplanets
+(a planet could show O2/O3 in its spectrum with zero biology involved).
+
+**What we found running it:** turning escape on does let free O2/O3
+persist, but in this model it reaches a modest, *self-limited* steady
+state rather than an unbounded runaway -- O3's own photolysis
+(`O3 -> O2 + O*`) provides a reverse flux that grows right along with O3's
+forward production, the same balance that maintains a roughly steady
+concentration in the real stratospheric ozone layer. Across escape rates
+from 0.1 up to 100 (and simulated times up to 3000 units), starting from
+300 CH4 + 300 H2O, O3 plateaued around 60-70 molecules -- present, but not
+enough of a *standing* population to seriously outcompete hydrocarbon
+self-combination for the transient radical pool (scavenging events stayed
+near zero in most of these runs, versus hundreds to thousands of
+self-combination events). Compare that to the atmosphere experiments
+above, where O2 was seeded directly at *thousands* of molecules (a modern
+Earth-like ratio) and scavenging dominated overwhelmingly -- the difference
+is standing abundance, not mechanism. So: **on this toy model's own terms,
+a wet planet exposed only to UV does not obviously drive prebiotic
+hydrocarbon chemistry to ~0% -- the oxidant it can self-generate this way
+plateaus well short of the seeded-O2-rich scenario**, unless escape and/or
+water-photolysis rates are pushed well past what's realistic (both are
+adjustable in the UI, so you can push past that line yourself and watch
+the crossover happen). This is consistent with the real open question in
+astrobiology: exactly how much abiotic O2 a given planet can accumulate
+this way depends sensitively on escape rate, UV flux, and geological
+timescales most toy models (including this one) don't fully capture --
+see Limitations.
+
+## Electricity vs UV as an energy source
+
+Miller-Urey's original experiment used electric spark discharge, not UV,
+and that choice was load-bearing, not incidental: **N2's triple bond
+(~9.8 eV) is beyond what UV in this model's implied range can break, but a
+spark's energy density is high enough to crack it.** That's precisely why
+discharge could pull nitrogen into the reducing gas mixture (toward HCN
+and, eventually, amino acids) while pure UV photolysis of CH4/NH3/H2/H2O
+mostly can't reach N2 at all. UV also tends to be far more *wavelength-
+selective* (governed by each bond's absorption cross-section) than a spark,
+which is closer to indiscriminately energetic across whatever bonds are
+present. On the other hand, UV was almost certainly the *larger total
+energy source* on early Earth's surface/upper atmosphere (lightning is
+intense but rare and localized; solar UV is diffuse but enormously more
+abundant in integrated flux) -- both mechanisms are real and complementary
+in the literature, not competing explanations.
+
+This model doesn't currently implement a distinct "discharge" mode -- doing
+that properly means giving N2 its own photolysis-like dissociation channel
+(`N2 -> 2 N*`) plus at least minimal downstream N-radical chemistry
+(combining with H*/hydrocarbon radicals toward amine/nitrile-like
+products), which is a comparable-sized addition to the O-chemistry already
+built here. It's the natural next step if nitrogen incorporation is the
+next question -- flagged in the Roadmap below rather than bolted on
+speculatively.
+
 **Simulation** uses the Gillespie stochastic simulation algorithm (SSA) over
 a reaction network that grows on demand: the first time a new molecule
 appears, the three rules generate whatever new reactions it enables against
@@ -215,6 +292,13 @@ chemistry back down about as fast as photochemistry can make it.
   (`O* + O2 -> O3`) is modeled as simple bimolecular; the real reaction is
   termolecular (`O + O2 + M -> O3 + M`) and pressure-dependent. O2/N2/Ar
   don't create any general pressure or third-body effect in this model.
+- **No full HOx chemistry.** Water photolysis's secondary oxygen-bootstrap
+  path stops at one reaction (`OH* + OH* -> H2O + O*`). Real atmospheric
+  HOx chemistry also includes H2O2 and HO2, which this model doesn't track.
+- **Escape has no altitude/exobase physics.** Hydrogen escape is a flat
+  first-order rate applied uniformly to H2/H*, not a function of where in
+  an atmosphere they are, temperature, or stellar XUV flux -- real
+  atmospheric escape is governed by all of these.
 - **No true catalysis (in the hydrocarbon-only cycle-detection sense).**
   Nothing in the *hydrocarbon* reaction-network engine has its rate
   enhanced by the presence of another species. The cycles detected by
@@ -253,22 +337,30 @@ Roughly in order of how directly each one advances the actual question:
    classes -- unlocking a much richer, more Miller-Urey-like reaction space
    and real catalytic possibilities (e.g. a species that lowers another
    reaction's activation energy).
-2. **Rings.** Lift the tree-only restriction; rings enable a different
+2. **Nitrogen radical chemistry / discharge mode.** Give N2 its own
+   dissociation channel (representing electric discharge rather than UV,
+   since UV in this model genuinely can't reach N2's bond strength) plus
+   minimal N-radical combination chemistry -- the natural path toward
+   HCN-like precursors and, eventually, amino acid building blocks, and a
+   direct test of "does electricity change the answer" rather than just
+   discussing it.
+3. **Rings.** Lift the tree-only restriction; rings enable a different
    class of stable, potentially catalytic structures.
-3. **Explicit catalysis.** Let some species appear as a rate multiplier on
+4. **Explicit catalysis.** Let some species appear as a rate multiplier on
    a reaction (not just a reactant/product) so the autocatalysis detector
    can test the real Kauffman condition, not just chain-propagation flux.
-4. **RAF (reflexively autocatalytic, food-generated) set analysis.** Once
+5. **RAF (reflexively autocatalytic, food-generated) set analysis.** Once
    catalysis is explicit, implement the actual RAF algorithm instead of the
    current cycle-flux heuristic -- this is the rigorous version of what
    `engine/autocatalysis.py` currently approximates.
-5. **Polymers + templating.** The real jump: a backbone chemistry (even a
+6. **Polymers + templating.** The real jump: a backbone chemistry (even a
    toy one) where sequence can be copied with occasional error. This is
    where "Darwinian" stops being a stretch and starts being literal --
    variation + heredity + differential survival.
-6. **Spatial structure.** Compartments or surfaces that let useful
+7. **Spatial structure.** Compartments or surfaces that let useful
    combinations of molecules stay together instead of diluting into a
-   well-mixed soup.
+   well-mixed soup. Also where altitude-dependent escape/UV physics would
+   belong, if the wet-planet question above needs to get more realistic.
 
 ## Project layout
 
