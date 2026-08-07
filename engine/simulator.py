@@ -21,6 +21,14 @@ class SimParams:
     k_photo: float = 0.02      # UV photolysis rate constant (per equivalent C-H bond)
     k_comb: float = 5.0        # radical-radical combination rate constant
     k_abstr: float = 0.5       # H-abstraction base rate constant
+    k_photo_o2: float = 0.03   # O2 -> 2 O* photolysis rate constant
+    k_photo_co2: float = 0.005  # CO2 -> CO + O* photolysis rate constant (needs harder UV, so lower by default)
+    k_o2_scavenge: float = 5.0  # R* + O2 -> ROO* rate constant; same order as k_comb by
+                                 # default so the O2-vs-self-combination outcome is driven
+                                 # by relative *concentration*, not a thumb on the scale
+    k_o3_formation: float = 5.0  # O* + O2 -> O3 rate constant (near diffusion-limited, like k_comb)
+    k_photo_o3: float = 0.08     # O3 -> O2 + O* photolysis rate constant (weaker bond than O2, so higher than k_photo_o2)
+    k_o3_scavenge: float = 8.0   # R* + O3 -> RO* + O2; ozone reacts with radicals faster than O2 does in reality
     max_carbon: int = 6        # complexity ceiling: cap on carbons per molecule
     t_max: float = 500.0
     max_events: int = 200_000
@@ -61,6 +69,12 @@ class Simulator:
                 k_photo=self.p.k_photo,
                 k_comb=self.p.k_comb,
                 k_abstr=self.p.k_abstr,
+                k_photo_o2=self.p.k_photo_o2,
+                k_photo_co2=self.p.k_photo_co2,
+                k_o2_scavenge=self.p.k_o2_scavenge,
+                k_o3_formation=self.p.k_o3_formation,
+                k_photo_o3=self.p.k_photo_o3,
+                k_o3_scavenge=self.p.k_o3_scavenge,
             )
             for r in new_reactions:
                 self.reactions.setdefault(r.key, r)

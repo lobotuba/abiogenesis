@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from engine.autocatalysis import build_flow_graph, find_candidate_cycles
-from engine.molecule import SEED_MOLECULES
+from engine.molecule import ATMOSPHERIC_GASES, Molecule, SEED_MOLECULES, ethane
 from engine.simulator import SimParams, Simulator
 
 st.set_page_config(page_title="Abiogenesis: hydrocarbon photochemistry", layout="wide")
@@ -20,20 +20,57 @@ st.set_page_config(page_title="Abiogenesis: hydrocarbon photochemistry", layout=
 st.title("Methane photochemistry -> reaction-network complexity")
 st.caption(
     "CH4 + UV -> CH3• + H•, then radical combination and H-abstraction let the "
-    "network grow on its own. This is a toy, non-calibrated model: the interesting "
-    "question isn't absolute rates, it's whether the *shape* of the reaction network "
-    "(chain-propagation cycles) gives anything for selection to act on."
+    "network grow on its own. Add N2/O2/CO2/Ar to test the central question: does "
+    "the C2H6 that forms actually *accumulate*, or does O2 outcompete radical "
+    "self-combination and divert it into oxidized products instead? This is a "
+    "toy, non-calibrated model -- see README for what it does and doesn't capture."
 )
+
+ATMOSPHERE_PRESETS = {
+    "Pure methane (baseline, no O2/N2/CO2/Ar)": dict(n2=0, o2=0, co2=0, ar=0),
+    "Reducing, early-Earth-like (trace O2)": dict(n2=200, o2=5, co2=20, ar=5),
+    "Modern oxidizing atmosphere (O2-rich)": dict(n2=780, o2=210, co2=4, ar=10),
+    "Custom": dict(n2=0, o2=0, co2=0, ar=0),
+}
 
 with st.sidebar:
     st.header("Setup")
     seed_name = st.selectbox("Starting molecule", list(SEED_MOLECULES.keys()), index=0)
     seed_count = st.slider("Starting molecule count", 10, 2000, 300, step=10)
 
+    st.header("Atmosphere")
+    preset_name = st.selectbox("Preset", list(ATMOSPHERE_PRESETS.keys()), index=0)
+    defaults = ATMOSPHERE_PRESETS[preset_name]
+    n2_count = st.slider("N2 count", 0, 2000, defaults["n2"], step=10, key=f"n2_{preset_name}")
+    o2_count = st.slider("O2 count", 0, 2000, defaults["o2"], step=10, key=f"o2_{preset_name}")
+    co2_count = st.slider("CO2 count", 0, 500, defaults["co2"], step=5, key=f"co2_{preset_name}")
+    ar_count = st.slider("Ar count", 0, 500, defaults["ar"], step=5, key=f"ar_{preset_name}")
+    st.caption(
+        "N2 and Ar never react in this model (accurately: N2's triple bond needs far "
+        "harder UV than this sim implies; Ar is a noble gas). O2 and CO2 photolyze; O2 "
+        "additionally *scavenges* hydrocarbon radicals directly, and separately builds up "
+        "O3 (ozone) with UV-generated O atoms -- O3 is itself highly reactive and scavenges "
+        "radicals too. See the callout below the run for how this plays out."
+    )
+
     st.header("Rate constants (relative units)")
-    k_photo = st.slider("UV photolysis (k_photo)", 0.001, 1.0, 0.05, step=0.001, format="%.3f")
+    k_photo = st.slider("UV photolysis, hydrocarbons (k_photo)", 0.001, 1.0, 0.05, step=0.001, format="%.3f")
     k_comb = st.slider("Radical combination (k_comb)", 0.1, 50.0, 5.0, step=0.1)
     k_abstr = st.slider("H-abstraction (k_abstr)", 0.01, 10.0, 0.5, step=0.01)
+    k_photo_o2 = st.slider("UV photolysis, O2 (k_photo_o2)", 0.0, 1.0, 0.03, step=0.001, format="%.3f")
+    k_photo_co2 = st.slider("UV photolysis, CO2 (k_photo_co2)", 0.0, 1.0, 0.005, step=0.001, format="%.3f")
+    k_o2_scavenge = st.slider(
+        "Radical + O2 scavenging (k_o2_scavenge)", 0.0, 50.0, 5.0, step=0.1,
+        help="Same order of magnitude as k_comb by default, so which pathway wins is "
+             "driven by relative O2 vs. radical *concentration*, not a thumb on the scale.",
+    )
+    k_o3_formation = st.slider("O* + O2 -> O3 formation (k_o3_formation)", 0.0, 50.0, 5.0, step=0.1)
+    k_photo_o3 = st.slider("UV photolysis, O3 (k_photo_o3)", 0.0, 1.0, 0.08, step=0.001, format="%.3f")
+    k_o3_scavenge = st.slider(
+        "Radical + O3 scavenging (k_o3_scavenge)", 0.0, 50.0, 8.0, step=0.1,
+        help="Ozone is set to react with radicals a bit faster than O2 by default, matching "
+             "how reactive O3 actually is toward radical species in real atmospheric chemistry.",
+    )
 
     st.header("Complexity & run length")
     max_carbon = st.slider("Max carbons per molecule (complexity ceiling)", 2, 10, 6)
@@ -48,11 +85,16 @@ with st.sidebar:
 if run_clicked:
     params = SimParams(
         k_photo=k_photo, k_comb=k_comb, k_abstr=k_abstr,
+        k_photo_o2=k_photo_o2, k_photo_co2=k_photo_co2, k_o2_scavenge=k_o2_scavenge,
+        k_o3_formation=k_o3_formation, k_photo_o3=k_photo_o3, k_o3_scavenge=k_o3_scavenge,
         max_carbon=max_carbon, t_max=t_max, max_events=max_events,
         sample_every=max(1, max_events // 500), seed=int(seed),
     )
     sim = Simulator(params)
     sim.seed_species(SEED_MOLECULES[seed_name](), seed_count)
+    for gas_name, count in [("N2", n2_count), ("O2", o2_count), ("CO2", co2_count), ("Ar", ar_count)]:
+        if count > 0:
+            sim.seed_species(ATMOSPHERIC_GASES[gas_name](), count)
     with st.spinner("Running Gillespie simulation..."):
         result = sim.run()
     st.session_state["result"] = result
@@ -70,6 +112,47 @@ c1.metric("Species discovered", len(result.species))
 c2.metric("Reactions in network", len(result.reactions))
 c3.metric("Events fired", len(result.event_log))
 c4.metric("Stopped because", result.stopped_reason)
+
+# -- Does C2H6 accumulate? ---------------------------------------------------
+comb_fires = sum(
+    n for k, n in result.reaction_fire_counts.items()
+    if k.startswith("combination:") and all(
+        isinstance(result.species.get(rid), Molecule)
+        for rid in k.split(":", 1)[1].split("->")[0].split("+")
+    )
+)
+o2_scav_fires = sum(n for k, n in result.reaction_fire_counts.items() if k.startswith("o2_scavenging:"))
+o3_scav_fires = sum(n for k, n in result.reaction_fire_counts.items() if k.startswith("ozone_scavenging:"))
+scav_fires = o2_scav_fires + o3_scav_fires
+o3_now = result.counts.get("O3", 0)
+c2h6_id = ethane().canonical_id()
+c2h6_now = result.counts.get(c2h6_id, 0)
+c2h6_peak = max((snap.get(c2h6_id, 0) for snap in result.history_counts), default=0)
+
+ec1, ec2, ec3, ec4 = st.columns(4)
+ec1.metric("Hydrocarbon self-combinations fired", comb_fires)
+ec2.metric("O2 + O3 scavenging events fired", scav_fires, help=f"O2: {o2_scav_fires}, O3: {o3_scav_fires}")
+ec3.metric("O3 (ozone) now", o3_now)
+ec4.metric("C2H6 now / peak", f"{c2h6_now} / {c2h6_peak}")
+
+if o2_count == 0:
+    st.info("No O2 in this run -- self-combination has no competition, so any C2H6 formed just accumulates.")
+elif scav_fires > comb_fires * 3:
+    st.warning(
+        f"**O2/O3 win this competition** ({scav_fires} scavenging events -- {o2_scav_fires} direct O2, "
+        f"{o3_scav_fires} via ozone -- vs {comb_fires} self-combinations). Hydrocarbon radicals are being "
+        "captured into peroxy/alkoxy radicals faster than they can dimerize into C2H6 -- consistent with why "
+        "an oxidizing atmosphere is hostile to hydrocarbon accumulation, and why prebiotic chemistry is "
+        "generally thought to need a *reducing* (low-O2) atmosphere. Note O2 exposed to UV doesn't just sit "
+        "there either: it builds up O3, which is itself a fast, independent radical sink (see O3 count above)."
+    )
+elif comb_fires > scav_fires * 3:
+    st.success(
+        f"**Self-combination wins** ({comb_fires} vs {scav_fires} O2/O3 scavenging events) -- O2 is too scarce "
+        "here to intercept much of the radical pool, so C2H6 forms largely unopposed."
+    )
+else:
+    st.info(f"The two pathways are roughly balanced ({comb_fires} self-combination vs {scav_fires} O2/O3 scavenging).")
 
 tab_pop, tab_net, tab_cycles, tab_species = st.tabs(
     ["Population dynamics", "Reaction network", "Autocatalytic cycles", "Species inventory"]

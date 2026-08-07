@@ -4,7 +4,20 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from engine.molecule import ATOMIC_H, MOLECULAR_H2, combine, ethane, methane, propane
+from engine.molecule import (
+    ATMOSPHERIC_GASES,
+    ATOMIC_H,
+    ATOMIC_O,
+    HYDROXYL_OH,
+    MOLECULAR_H2,
+    MOLECULAR_H2O,
+    MOLECULAR_O2,
+    MOLECULAR_O3,
+    combine,
+    ethane,
+    methane,
+    propane,
+)
 from engine.reactions import generate_reactions_for_species
 from engine.simulator import SimParams, Simulator
 from engine.autocatalysis import find_candidate_cycles
@@ -82,9 +95,164 @@ def test_simulation_runs_and_produces_ethane():
     check("cycle search runs without error", isinstance(cycles, list))
 
 
+def test_oxygen_chemistry_combinations():
+    check("O + O -> O2", combine(ATOMIC_O, ATOMIC_O).formula() == "O2")
+    check("O + H -> OH", combine(ATOMIC_O, ATOMIC_H).formula() == "OH•")
+    check("H + O -> OH (order independent)", combine(ATOMIC_H, ATOMIC_O).formula() == "OH•")
+    check("OH + H -> H2O", combine(HYDROXYL_OH, ATOMIC_H).formula() == "H2O")
+
+    methyl = methane().radicalizable_sites()[0].product
+    methoxy = combine(methyl, ATOMIC_O)
+    check("CH3* + O* -> CH3O* (alkoxy radical)", methoxy.formula() == "C1H3O•")
+    check("alkoxy radical is a radical", methoxy.is_radical)
+
+    methanol = combine(methoxy, ATOMIC_H)
+    check("CH3O* + H* -> CH3OH (alcohol)", methanol.formula() == "C1H3OH")
+    check("alcohol is closed-shell", not methanol.is_radical)
+
+    from engine.molecule import PeroxyRadical
+    peroxy = PeroxyRadical(methyl)
+    check("CH3* + O2 -> CH3OO* formula", peroxy.formula() == "C1H3OO•")
+    hydroperoxide = combine(peroxy, ATOMIC_H)
+    check("CH3OO* + H* -> CH3OOH", hydroperoxide.formula() == "C1H3OOH")
+    check("hydroperoxide is closed-shell", not hydroperoxide.is_radical)
+
+    check("two peroxy radicals -> not modeled (None)", combine(peroxy, PeroxyRadical(methyl)) is None)
+
+
+def test_o2_photolysis_and_scavenging_reaction_generation():
+    pool = {"O2": MOLECULAR_O2}
+    reactions = generate_reactions_for_species(
+        "O2", MOLECULAR_O2, {}, max_carbon=6,
+        k_photo=1.0, k_comb=1.0, k_abstr=1.0, k_photo_o2=2.0, k_photo_co2=0.1, k_o2_scavenge=3.0,
+    )
+    check("O2 alone yields exactly its photolysis reaction", len(reactions) == 1)
+    r = reactions[0]
+    check("O2 photolysis kind", r.kind == "photolysis")
+    check("O2 photolysis uses k_photo_o2", r.rate_constant == 2.0)
+    check("O2 photolysis products are 2x O*", sorted(p.formula() for p in r.products) == ["O•", "O•"])
+
+    # Now a methyl radical discovered while O2 is already in the pool should
+    # get an o2_scavenging reaction generated against it.
+    methyl = methane().radicalizable_sites()[0].product
+    reactions2 = generate_reactions_for_species(
+        methyl.canonical_id(), methyl, pool, max_carbon=6,
+        k_photo=1.0, k_comb=1.0, k_abstr=1.0, k_photo_o2=2.0, k_photo_co2=0.1, k_o2_scavenge=3.0,
+    )
+    scavenging = [r for r in reactions2 if r.kind == "o2_scavenging"]
+    check("methyl radical gets an o2_scavenging reaction against existing O2", len(scavenging) == 1)
+    check("o2_scavenging product is a peroxy radical", scavenging[0].products[0].formula() == "C1H3OO•")
+
+
+def test_o2_competes_with_self_combination_for_c2h6():
+    """The central question: with O2 present, does CH3* preferentially form
+    C2H6 (self-combination) or CH3OO* (O2 scavenging)? Run twice with the
+    same seed/rates but very different O2 abundance and check the balance
+    of *fired* reactions swings the way real chemistry says it should."""
+
+    def run(o2_count):
+        params = SimParams(
+            k_photo=0.05, k_comb=5.0, k_abstr=0.5,
+            k_photo_o2=0.0,  # isolate the scavenging competition; no O2 photolysis noise
+            k_o2_scavenge=5.0,  # same order as k_comb on purpose -- see SimParams docstring
+            max_carbon=4, t_max=300.0, max_events=8000, sample_every=50, seed=7,
+        )
+        sim = Simulator(params)
+        sim.seed_species(methane(), 300)
+        if o2_count > 0:
+            sim.seed_species(ATMOSPHERIC_GASES["O2"](), o2_count)
+        result = sim.run()
+        comb_fires = sum(n for k, n in result.reaction_fire_counts.items() if k.startswith("combination:"))
+        scav_fires = sum(n for k, n in result.reaction_fire_counts.items() if k.startswith("o2_scavenging:"))
+        return comb_fires, scav_fires, result
+
+    comb_no_o2, scav_no_o2, _ = run(0)
+    check("with no O2, zero scavenging events fire", scav_no_o2 == 0)
+    check("with no O2, some self-combination fires", comb_no_o2 > 0)
+
+    comb_hi_o2, scav_hi_o2, result_hi = run(4000)  # O2-rich: abundant relative to trace CH3*
+    check("with abundant O2, scavenging fires far more than self-combination",
+          scav_hi_o2 > comb_hi_o2 * 5)
+    c2h6_id = ethane().canonical_id()
+    print(f"  -> low-O2: {comb_no_o2} combination fires, {scav_no_o2} scavenging fires")
+    print(f"  -> high-O2: {comb_hi_o2} combination fires, {scav_hi_o2} scavenging fires, "
+          f"final C2H6 count = {result_hi.counts.get(c2h6_id, 0)}")
+
+    # Carbon conservation must still hold across the extended species zoo
+    # (peroxy/alkoxy/alcohol/hydroperoxide all delegate n_carbon to their parent).
+    total_c = sum(sp.n_carbon * result_hi.counts.get(sid, 0) for sid, sp in result_hi.species.items())
+    check(f"carbon conserved with O2 chemistry active ({total_c} == 300)", total_c == 300)
+
+
+def test_ozone_formation_photolysis_and_scavenging():
+    # O* discovered while O2 already present -> ozone_formation reaction.
+    pool = {"O2": MOLECULAR_O2}
+    reactions = generate_reactions_for_species(
+        "O", ATOMIC_O, pool, max_carbon=6,
+        k_photo=1.0, k_comb=1.0, k_abstr=1.0,
+        k_o3_formation=4.0, k_photo_o3=0.5, k_o3_scavenge=6.0,
+    )
+    formation = [r for r in reactions if r.kind == "ozone_formation"]
+    check("O* + O2 in pool yields exactly one ozone_formation reaction", len(formation) == 1)
+    check("ozone_formation product is O3", formation[0].products[0].formula() == "O3")
+    check("ozone_formation uses k_o3_formation", formation[0].rate_constant == 4.0)
+
+    # O3 alone photolyzes back to O2 + O*.
+    reactions_o3 = generate_reactions_for_species(
+        "O3", MOLECULAR_O3, {}, max_carbon=6,
+        k_photo=1.0, k_comb=1.0, k_abstr=1.0, k_photo_o3=0.5,
+    )
+    photo = [r for r in reactions_o3 if r.kind == "photolysis"]
+    check("O3 alone yields exactly one photolysis reaction", len(photo) == 1)
+    check("O3 photolysis uses k_photo_o3", photo[0].rate_constant == 0.5)
+    check("O3 photolysis products are O2 + O*",
+          sorted(p.formula() for p in photo[0].products) == ["O2", "O•"])
+
+    # A methyl radical discovered while O3 is already present -> ozone_scavenging.
+    methyl = methane().radicalizable_sites()[0].product
+    reactions3 = generate_reactions_for_species(
+        methyl.canonical_id(), methyl, {"O3": MOLECULAR_O3}, max_carbon=6,
+        k_photo=1.0, k_comb=1.0, k_abstr=1.0, k_o3_scavenge=6.0,
+    )
+    scav = [r for r in reactions3 if r.kind == "ozone_scavenging"]
+    check("methyl radical gets an ozone_scavenging reaction against existing O3", len(scav) == 1)
+    check("ozone_scavenging uses k_o3_scavenge", scav[0].rate_constant == 6.0)
+    prod_formulas = sorted(p.formula() for p in scav[0].products)
+    check("CH3* + O3 -> CH3O* + O2", prod_formulas == ["C1H3O•", "O2"])
+
+
+def test_full_atmosphere_ethane_accumulation():
+    """End-to-end check with default (nonzero) O2/O3 chemistry active:
+    seeding abundant O2 alongside methane should still suppress C2H6
+    accumulation once ozone's additional scavenging pathway is included."""
+    params = SimParams(
+        k_photo=0.05, k_comb=5.0, k_abstr=0.5,
+        max_carbon=4, t_max=300.0, max_events=8000, sample_every=50, seed=11,
+    )  # k_photo_o2/k_o2_scavenge/k_o3_formation/k_photo_o3/k_o3_scavenge all at their SimParams defaults
+    sim = Simulator(params)
+    sim.seed_species(methane(), 300)
+    sim.seed_species(ATMOSPHERIC_GASES["O2"](), 3000)
+    result = sim.run()
+
+    c2h6_id = ethane().canonical_id()
+    o2_sink_fires = sum(n for k, n in result.reaction_fire_counts.items()
+                         if k.startswith("o2_scavenging:") or k.startswith("ozone_scavenging:"))
+    comb_fires = sum(n for k, n in result.reaction_fire_counts.items() if k.startswith("combination:"))
+    print(f"  -> full atmosphere run: {comb_fires} self-combinations, {o2_sink_fires} O2/O3 scavenging events, "
+          f"final C2H6 = {result.counts.get(c2h6_id, 0)}, O3 formed = {result.counts.get('O3', 0)}")
+    check("O2/O3 scavenging dominates over self-combination with abundant O2",
+          o2_sink_fires > comb_fires)
+    check("some ozone actually formed", any(k.startswith("ozone_formation:") for k in result.reaction_fire_counts))
+
+
 if __name__ == "__main__":
     test_molecule_formulas()
     test_radicalization_and_combination()
     test_reaction_generation_from_methane()
     test_simulation_runs_and_produces_ethane()
+    test_oxygen_chemistry_combinations()
+    test_o2_photolysis_and_scavenging_reaction_generation()
+    test_o2_competes_with_self_combination_for_c2h6()
+    test_ozone_formation_photolysis_and_scavenging()
+    test_full_atmosphere_ethane_accumulation()
     print("\nAll sanity checks passed.")
