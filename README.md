@@ -1,16 +1,21 @@
 # Abiogenesis: from methane photolysis to autocatalytic networks
 
-A stochastic chemistry simulator exploring two linked questions:
+A stochastic chemistry simulator exploring three linked questions:
 
 1. Starting from UV photolysis of methane (CH4 + hv -> CH3• + H•), and
    letting the resulting radical chemistry grow in complexity on its own,
    does the reaction network ever produce **self-amplifying loops** -- the
    minimal structural prerequisite for Darwinian dynamics (differential
    reproduction) to have something to act on?
-2. Add the rest of a plausible atmosphere -- N2, O2, CO2, Ar -- and expose
-   it to the same UV: does the C2H6 that photochemistry produces actually
-   **accumulate**, or does O2 (and the O3 it generates) outcompete radical
-   self-combination and divert the carbon into oxidized products instead?
+2. Add the rest of a plausible atmosphere -- N2, O2, CO2, Ar, H2O -- and
+   expose it to the same UV: does the C2H6 that photochemistry produces
+   actually **accumulate**, or does O2 (direct, or self-generated from
+   water) outcompete radical self-combination and divert the carbon into
+   oxidized products instead?
+3. Add electricity as a distinct energy source: is there a real chemical
+   difference between UV and electric discharge, or is "electricity" just
+   UV with a different label? (There's a concrete answer: N2's triple bond
+   is a wall UV in this model can never get through, but a spark can.)
 
 This is a toy model, not a calibrated photochemistry code. It's built to
 let you see the *shape* of emergent chemical networks and the *qualitative*
@@ -156,14 +161,27 @@ intense but rare and localized; solar UV is diffuse but enormously more
 abundant in integrated flux) -- both mechanisms are real and complementary
 in the literature, not competing explanations.
 
-This model doesn't currently implement a distinct "discharge" mode -- doing
-that properly means giving N2 its own photolysis-like dissociation channel
-(`N2 -> 2 N*`) plus at least minimal downstream N-radical chemistry
-(combining with H*/hydrocarbon radicals toward amine/nitrile-like
-products), which is a comparable-sized addition to the O-chemistry already
-built here. It's the natural next step if nitrogen incorporation is the
-next question -- flagged in the Roadmap below rather than bolted on
-speculatively.
+**Electricity is now a first-class variable** (`k_discharge_n2`, off by
+default): `N2 + spark -> 2 N*`, generated as its own "discharge" reaction
+kind, deliberately separate from photolysis. This is the one thing in the
+whole model that UV categorically cannot do at any intensity -- confirmed
+directly in testing (`test_electricity_cracks_n2_but_uv_alone_never_does`):
+with discharge off, N2 sits at its exact seeded count no matter how much UV
+or simulated time runs; with discharge on, it visibly depletes. Once N*
+exists it plugs into the *existing* combination/abstraction machinery for
+free -- no new rules needed there, only new species: N* + N* -> N2
+(recombination), N* + H* -> NH* (imidogen), and N* (or NH*) + a hydrocarbon
+radical -> a closed-shell amine `R-NH2` in one step. That last one
+deliberately skips a valence-correct aminyl-radical intermediate (nitrogen
+is trivalent; a bond + a single "radical site" the way this model already
+treats O doesn't divide as cleanly for N) -- see `engine/molecule.py` for
+the reasoning. In one test run (300 CH4 + 300 N2, discharge on), nitrogen
+took over the system: NH3 became the single most abundant product, methane/
+ethane/propane were fully converted, and amines (C1H3NH2 through C4H9NH2)
+accounted for most of the remaining carbon -- a small-scale, qualitative
+echo of what discharge does that UV alone cannot. No N-O cross chemistry
+(real NOx chemistry) is modeled -- a deliberate scope cut to keep this
+addition focused on the one question it was built to answer.
 
 **Simulation** uses the Gillespie stochastic simulation algorithm (SSA) over
 a reaction network that grows on demand: the first time a new molecule
@@ -299,6 +317,13 @@ chemistry back down about as fast as photochemistry can make it.
   first-order rate applied uniformly to H2/H*, not a function of where in
   an atmosphere they are, temperature, or stellar XUV flux -- real
   atmospheric escape is governed by all of these.
+- **Nitrogen chemistry stops at one amine-forming step.** N* + hydrocarbon
+  radical goes straight to a closed-shell amine (`R-NH2`), skipping a
+  valence-correct aminyl-radical intermediate (see Electricity section
+  above). No N-O cross chemistry (NOx) is modeled, and no path toward
+  nitriles/HCN -- the real Miller-Urey route to amino acid precursors goes
+  further than this model does. NH is treated as terminal, same
+  simplification as OH.
 - **No true catalysis (in the hydrocarbon-only cycle-detection sense).**
   Nothing in the *hydrocarbon* reaction-network engine has its rate
   enhanced by the presence of another species. The cycles detected by
@@ -328,22 +353,19 @@ chemistry back down about as fast as photochemistry can make it.
 Roughly in order of how directly each one advances the actual question:
 
 1. **General heteroatoms in the graph.** O2/CO2/O3/N2/Ar and first-step
-   oxidation products are in now (see Atmosphere section), but as fixed/
-   wrapper species bolted onto the carbon-only graph, not as O/N nodes
-   *inside* it. Generalizing `Molecule` to carry element type and bond
-   order per node/edge (valence table `{C:4, N:3, O:2, H:1}`, H-count still
-   implicit) would let carbonyls, ethers, amines, and multi-step oxidation
-   chains fall out of the *same* rule engine instead of hand-written wrapper
-   classes -- unlocking a much richer, more Miller-Urey-like reaction space
-   and real catalytic possibilities (e.g. a species that lowers another
-   reaction's activation energy).
-2. **Nitrogen radical chemistry / discharge mode.** Give N2 its own
-   dissociation channel (representing electric discharge rather than UV,
-   since UV in this model genuinely can't reach N2's bond strength) plus
-   minimal N-radical combination chemistry -- the natural path toward
-   HCN-like precursors and, eventually, amino acid building blocks, and a
-   direct test of "does electricity change the answer" rather than just
-   discussing it.
+   oxidation/amination products are in now (see Atmosphere and Electricity
+   sections), but as fixed/wrapper species bolted onto the carbon-only
+   graph, not as O/N nodes *inside* it. Generalizing `Molecule` to carry
+   element type and bond order per node/edge (valence table
+   `{C:4, N:3, O:2, H:1}`, H-count still implicit) would let carbonyls,
+   ethers, amines with a *correct* aminyl-radical intermediate, and
+   multi-step oxidation chains fall out of the *same* rule engine instead
+   of hand-written wrapper classes -- unlocking a much richer, more
+   Miller-Urey-like reaction space and real catalytic possibilities (e.g. a
+   species that lowers another reaction's activation energy).
+2. **Nitrile / HCN chemistry.** The real Miller-Urey route to amino acid
+   precursors goes through HCN and related nitriles, not just amines --
+   this model's nitrogen chemistry stops one step short of that.
 3. **Rings.** Lift the tree-only restriction; rings enable a different
    class of stable, potentially catalytic structures.
 4. **Explicit catalysis.** Let some species appear as a rate multiplier on
@@ -367,7 +389,7 @@ Roughly in order of how directly each one advances the actual question:
 ```
 engine/
   molecule.py       carbon-skeleton graph representation, seed molecules,
-                     and the fixed/wrapper atmospheric + oxidation species
+                     and the fixed/wrapper atmospheric + oxidation/amination species
   reactions.py       the reaction rules + Reaction/propensity model
   simulator.py       Gillespie SSA with on-demand reaction-network growth
   autocatalysis.py   realized-flow graph + candidate cycle detection

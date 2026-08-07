@@ -7,10 +7,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.molecule import (
     ATMOSPHERIC_GASES,
     ATOMIC_H,
+    ATOMIC_N,
     ATOMIC_O,
     HYDROXYL_OH,
+    IMIDOGEN_NH,
     MOLECULAR_H2,
     MOLECULAR_H2O,
+    MOLECULAR_N2,
+    MOLECULAR_NH3,
     MOLECULAR_O2,
     MOLECULAR_O3,
     combine,
@@ -338,6 +342,85 @@ def test_wet_planet_o2_buildup_needs_hydrogen_escape():
           scav_closed <= comb_closed * 3)
 
 
+def test_nitrogen_chemistry_combinations():
+    check("N* + N* -> N2", combine(ATOMIC_N, ATOMIC_N).formula() == "N2")
+    check("N* + H* -> NH* (imidogen)", combine(ATOMIC_N, ATOMIC_H).formula() == "NH•")
+    check("H* + N* -> NH* (order independent)", combine(ATOMIC_H, ATOMIC_N).formula() == "NH•")
+    nh3 = combine(IMIDOGEN_NH, ATOMIC_H)
+    check("NH* + H* -> NH3 (skips aminyl-radical intermediate)", nh3.formula() == "NH3")
+    check("NH* + H* product is the shared MOLECULAR_NH3 singleton", nh3.canonical_id() == MOLECULAR_NH3.canonical_id())
+    check("NH3 is closed-shell", not MOLECULAR_NH3.is_radical)
+
+    methyl = methane().radicalizable_sites()[0].product
+    amine_via_n = combine(methyl, ATOMIC_N)
+    check("CH3* + N* -> CH3NH2 (amine)", amine_via_n.formula() == "C1H3NH2")
+    check("amine is closed-shell", not amine_via_n.is_radical)
+    amine_via_nh = combine(methyl, IMIDOGEN_NH)
+    check("CH3* + NH* -> same amine (convergent path)",
+          amine_via_nh.canonical_id() == amine_via_n.canonical_id())
+
+
+def test_discharge_reaction_generation_and_uv_cannot_touch_n2():
+    """The core claim behind adding electricity as a variable: N2 should be
+    completely unreactive under UV alone (rule 1 never applies to it, and
+    no other UV-driven rule touches it either), and only get a live
+    discharge reaction when k_discharge_n2 is nonzero."""
+    reactions_uv_only = generate_reactions_for_species(
+        "N2", MOLECULAR_N2, {}, max_carbon=6,
+        k_photo=1.0, k_comb=1.0, k_abstr=1.0,  # no k_discharge_n2 passed -> defaults to 0.0
+    )
+    check("N2 with no discharge rate still gets a (rate=0) discharge reaction slot",
+          len(reactions_uv_only) == 1 and reactions_uv_only[0].kind == "discharge")
+    check("that reaction has zero rate constant (i.e. inert) when discharge is off",
+          reactions_uv_only[0].rate_constant == 0.0)
+
+    reactions_discharge = generate_reactions_for_species(
+        "N2", MOLECULAR_N2, {}, max_carbon=6,
+        k_photo=1.0, k_comb=1.0, k_abstr=1.0, k_discharge_n2=4.0,
+    )
+    disch = [r for r in reactions_discharge if r.kind == "discharge"]
+    check("N2 alone yields exactly one discharge reaction", len(disch) == 1)
+    check("discharge reaction uses k_discharge_n2", disch[0].rate_constant == 4.0)
+    check("N2 discharge products are 2x N*",
+          sorted(p.formula() for p in disch[0].products) == ["N•", "N•"])
+
+
+def test_electricity_cracks_n2_but_uv_alone_never_does():
+    """End-to-end: seed CH4 + N2 together. With discharge off, N2 must stay
+    at exactly its seeded count forever, no matter how much UV/time -- UV
+    genuinely cannot reach it in this model. With discharge on, N2 gets
+    consumed and nitrogen shows up incorporated into hydrocarbon radicals
+    as an amine."""
+
+    def run(k_discharge):
+        params = SimParams(
+            k_photo=0.05, k_comb=5.0, k_abstr=0.5, k_discharge_n2=k_discharge,
+            max_carbon=4, t_max=100.0, max_events=200_000, sample_every=1000, seed=17,
+        )
+        sim = Simulator(params)
+        sim.seed_species(methane(), 300)
+        sim.seed_species(MOLECULAR_N2, 300)
+        return sim.run()
+
+    result_uv_only = run(k_discharge=0.0)
+    check("with no discharge, N2 count is completely unchanged by UV",
+          result_uv_only.counts.get("N2", 0) == 300)
+    check("with no discharge, zero discharge events fired",
+          not any(k.startswith("discharge:") for k in result_uv_only.reaction_fire_counts))
+    check("with no discharge, no amine species ever appears",
+          not any(sid.startswith("RNH2:") for sid in result_uv_only.species))
+
+    result_discharge = run(k_discharge=3.0)
+    check("with discharge on, N2 count drops", result_discharge.counts.get("N2", 0) < 300)
+    check("with discharge on, discharge events fired",
+          any(k.startswith("discharge:") for k in result_discharge.reaction_fire_counts))
+    amine_formed = any(sid.startswith("RNH2:") for sid in result_discharge.species)
+    print(f"  -> UV-only: N2={result_uv_only.counts.get('N2', 0)}/300 remaining, amine formed=False (by construction)")
+    print(f"  -> with discharge: N2={result_discharge.counts.get('N2', 0)}/300 remaining, amine formed={amine_formed}")
+    check("with discharge on, at least one amine species (nitrogen incorporated into a hydrocarbon) formed",
+          amine_formed)
+
+
 def test_chain_length_stats_basic():
     from engine.molecule import Molecule as _Molecule
 
@@ -390,6 +473,9 @@ if __name__ == "__main__":
     test_water_photolysis_and_escape_reaction_generation()
     test_escape_is_an_irreversible_sink()
     test_wet_planet_o2_buildup_needs_hydrogen_escape()
+    test_nitrogen_chemistry_combinations()
+    test_discharge_reaction_generation_and_uv_cannot_touch_n2()
+    test_electricity_cracks_n2_but_uv_alone_never_does()
     test_chain_length_stats_basic()
     test_higher_uv_yields_longer_chains_at_fixed_time()
     print("\nAll sanity checks passed.")

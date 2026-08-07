@@ -34,6 +34,10 @@ class SimParams:
                                   # bootstrap free O2/O3 without any O2 present to begin with
     k_escape_h2: float = 0.0     # H2 -> escapes to space (irreversible sink); off by default, opt-in
     k_escape_h: float = 0.0      # H* -> escapes to space (irreversible sink); off by default, opt-in
+    k_discharge_n2: float = 0.0  # N2 -> 2 N* electric discharge (NOT UV); off by default, opt-in.
+                                  # This is "electricity" as a variable distinct from k_photo: UV in
+                                  # this model can never touch N2 (its bond is too strong), but a
+                                  # spark can -- see engine/reactions.py.
     max_carbon: int = 6        # complexity ceiling: cap on carbons per molecule
     t_max: float = 500.0
     max_events: int = 200_000
@@ -84,6 +88,7 @@ class Simulator:
                 k_oh_disprop=self.p.k_oh_disprop,
                 k_escape_h2=self.p.k_escape_h2,
                 k_escape_h=self.p.k_escape_h,
+                k_discharge_n2=self.p.k_discharge_n2,
             )
             for r in new_reactions:
                 self.reactions.setdefault(r.key, r)

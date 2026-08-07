@@ -24,8 +24,9 @@ st.caption(
     "network grow on its own. Add N2/O2/CO2/Ar/H2O to test the central question: does "
     "the C2H6 that forms actually *accumulate*, or does O2 (direct, or self-generated from "
     "water photolysis) outcompete radical self-combination and divert it into oxidized "
-    "products instead? This is a toy, non-calibrated model -- see README for what it does "
-    "and doesn't capture."
+    "products instead? Add electricity (discharge) to see UV's blind spot: N2's triple bond "
+    "is a bond UV in this model can never break, but a spark can -- the Miller-Urey question. "
+    "This is a toy, non-calibrated model -- see README for what it does and doesn't capture."
 )
 
 ATMOSPHERE_PRESETS = {
@@ -50,13 +51,14 @@ with st.sidebar:
     ar_count = st.slider("Ar count", 0, 500, defaults["ar"], step=5, key=f"ar_{preset_name}")
     h2o_count = st.slider("H2O count (a 'wet planet')", 0, 2000, defaults["h2o"], step=10, key=f"h2o_{preset_name}")
     st.caption(
-        "N2 and Ar never react in this model (accurately: N2's triple bond needs far "
-        "harder UV than this sim implies; Ar is a noble gas). O2 and CO2 photolyze; O2 "
+        "Ar never reacts in this model (it's a noble gas). O2 and CO2 photolyze; O2 "
         "additionally *scavenges* hydrocarbon radicals directly, and separately builds up "
         "O3 (ozone) with UV-generated O atoms -- O3 is itself highly reactive and scavenges "
         "radicals too. H2O also photolyzes (H2O -> H* + OH*); two OH* can disproportionate "
         "into H2O + O*, which is how a wet planet can bootstrap its *own* O2/O3 from water "
-        "alone, no free O2 required. See the callout below the run for how this plays out."
+        "alone, no free O2 required. N2 is UV-inert (its triple bond needs far harder UV "
+        "than this sim implies) *unless* electricity is turned on below. See the callouts "
+        "below the run for how this plays out."
     )
 
     st.header("Hydrogen escape")
@@ -72,6 +74,22 @@ with st.sidebar:
         "even a nonzero escape rate only produces a modest, self-limited O2/O3 steady state "
         "(ozone's own photolysis balances its formation) unless escape and/or water-photolysis "
         "rates are pushed well above realistic values -- see README."
+    )
+
+    st.header("Electricity (discharge)")
+    k_discharge_n2 = st.slider(
+        "N2 + spark -> 2 N* (k_discharge_n2)", 0.0, 20.0, 0.0, step=0.1,
+        help="Off (0) by default. UV in this model, at any intensity, never touches N2 -- "
+             "its triple bond (~9.8 eV) is beyond what's driving C-H/O2 photolysis here. This "
+             "is a qualitatively different energy source (electric spark, as in Miller-Urey) "
+             "that can reach it. Turn it on to let nitrogen enter the hydrocarbon chemistry.",
+    )
+    st.caption(
+        "Once N* exists it plugs into the same combination/abstraction machinery as "
+        "everything else for free: N* + N* -> N2 (recombination), N* + H* -> NH*, and "
+        "N* (or NH*) + a hydrocarbon radical -> a closed-shell amine (R-NH2) -- nitrogen "
+        "incorporated into organic chemistry, the way Miller-Urey's spark got nitrogen into "
+        "amino acid precursors. No N-O cross chemistry (real NOx) is modeled."
     )
 
     st.header("Rate constants (relative units)")
@@ -120,6 +138,7 @@ if run_clicked:
         k_o3_formation=k_o3_formation, k_photo_o3=k_photo_o3, k_o3_scavenge=k_o3_scavenge,
         k_photo_h2o=k_photo_h2o, k_oh_disprop=k_oh_disprop,
         k_escape_h2=k_escape, k_escape_h=k_escape,
+        k_discharge_n2=k_discharge_n2,
         max_carbon=max_carbon, t_max=t_max, max_events=max_events,
         sample_every=max(1, max_events // 500), seed=int(seed),
     )
@@ -201,6 +220,33 @@ elif comb_fires > scav_fires * 3:
     )
 else:
     st.info(f"The two pathways are roughly balanced ({comb_fires} self-combination vs {scav_fires} O2/O3 scavenging).")
+
+# -- Does electricity reach nitrogen where UV can't? -------------------------
+if n2_count > 0:
+    n2_now = result.counts.get("N2", 0)
+    n2_consumed = n2_count - n2_now
+    discharge_fires = sum(n for k, n in result.reaction_fire_counts.items() if k.startswith("discharge:"))
+    amine_count = sum(
+        n for sid, n in result.counts.items() if sid.startswith("RNH2:")
+    )
+    dc1, dc2, dc3 = st.columns(3)
+    dc1.metric("N2 remaining", f"{n2_now} / {n2_count}")
+    dc2.metric("Discharge events fired", discharge_fires)
+    dc3.metric("Amine (R-NH2) molecules formed", amine_count)
+    if k_discharge_n2 == 0.0:
+        st.info(
+            f"**Electricity is off**: N2 stayed at exactly {n2_now}/{n2_count}, completely untouched, no "
+            "matter how much UV or simulated time ran. This is the point -- UV in this model genuinely "
+            "cannot break N2's triple bond. Turn on the discharge rate (sidebar) to change that."
+        )
+    elif n2_consumed > 0:
+        st.success(
+            f"**Electricity cracked N2**: {n2_consumed} of {n2_count} N2 molecules dissociated, feeding "
+            f"{amine_count} amine molecules (nitrogen incorporated into hydrocarbon radicals) -- the Miller-"
+            "Urey mechanism in miniature. UV alone, at any intensity, cannot do this in this model."
+        )
+    else:
+        st.warning("Discharge is on but no N2 has dissociated yet -- try a higher rate or longer run.")
 
 tab_pop, tab_chain, tab_net, tab_cycles, tab_species = st.tabs(
     ["Population dynamics", "Chain-length distribution", "Reaction network",

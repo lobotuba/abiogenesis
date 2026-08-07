@@ -553,6 +553,112 @@ class _H2O:
         return "Molecule(H2O)"
 
 
+class _AtomicN:
+    """Atomic nitrogen, N*. Only reachable via electric discharge in this
+    model -- UV alone can't break N2's triple bond (see _N2 and the
+    "discharge" rule in reactions.py). Real ground-state N is a triradical
+    (three unpaired electrons); simplified to one reactive site here, same
+    simplification already used for H*/O*."""
+
+    __slots__ = ()
+
+    def canonical_id(self) -> str:
+        return "N"
+
+    def formula(self) -> str:
+        return "N•"
+
+    @property
+    def n_carbon(self) -> int:
+        return 0
+
+    @property
+    def is_radical(self) -> bool:
+        return True
+
+    def radicalizable_sites(self) -> list[Site]:
+        return []
+
+    def __eq__(self, other):
+        return isinstance(other, _AtomicN)
+
+    def __hash__(self):
+        return hash("N")
+
+    def __repr__(self):
+        return "Molecule(N•)"
+
+
+class _Imidogen:
+    """NH (imidogen radical), N* + H* -> NH*. Treated as terminal in this
+    model, same simplification as OH: no NH+NH disproportionation, nothing
+    abstracts its H back off."""
+
+    __slots__ = ()
+
+    def canonical_id(self) -> str:
+        return "NH"
+
+    def formula(self) -> str:
+        return "NH•"
+
+    @property
+    def n_carbon(self) -> int:
+        return 0
+
+    @property
+    def is_radical(self) -> bool:
+        return True
+
+    def radicalizable_sites(self) -> list[Site]:
+        return []
+
+    def __eq__(self, other):
+        return isinstance(other, _Imidogen)
+
+    def __hash__(self):
+        return hash("NH")
+
+    def __repr__(self):
+        return "Molecule(NH•)"
+
+
+class _Ammonia:
+    """NH3, NH* + H* -> NH3. Real chemistry goes NH* + H* -> NH2* (aminyl
+    radical, still reactive) -> NH2* + H* -> NH3; this model skips the
+    intermediate radical stage (same simplification as Amine above) and
+    goes directly to the closed-shell product. Terminal/unreactive from
+    here, same treatment as H2O."""
+
+    __slots__ = ()
+
+    def canonical_id(self) -> str:
+        return "NH3"
+
+    def formula(self) -> str:
+        return "NH3"
+
+    @property
+    def n_carbon(self) -> int:
+        return 0
+
+    @property
+    def is_radical(self) -> bool:
+        return False
+
+    def radicalizable_sites(self) -> list[Site]:
+        return []
+
+    def __eq__(self, other):
+        return isinstance(other, _Ammonia)
+
+    def __hash__(self):
+        return hash("NH3")
+
+    def __repr__(self):
+        return "Molecule(NH3)"
+
+
 ATOMIC_O = _AtomicO()
 HYDROXYL_OH = _Hydroxyl()
 MOLECULAR_O2 = _O2()
@@ -562,15 +668,19 @@ MOLECULAR_CO2 = _CO2()
 MOLECULAR_CO = _CO()
 ATOMIC_AR = _Argon()
 MOLECULAR_H2O = _H2O()
+ATOMIC_N = _AtomicN()
+IMIDOGEN_NH = _Imidogen()
+MOLECULAR_NH3 = _Ammonia()
 
 
-class _HydrocarbonOxideWrapper:
-    """Shared machinery for the four "hydrocarbon fragment + O-group"
-    species (peroxy/alkoxy radicals, hydroperoxides, alcohols): each just
-    tags a hydrocarbon Molecule fragment with a fixed O-containing group and
-    otherwise delegates to it. No further oxidation chemistry is modeled
-    past this first step (radicalizable_sites is always empty), which caps
-    this model's oxidation chemistry at one O-addition per radical."""
+class _HydrocarbonGroupWrapper:
+    """Shared machinery for "hydrocarbon fragment + heteroatom group"
+    species (peroxy/alkoxy radicals, hydroperoxides, alcohols, amines):
+    each just tags a hydrocarbon Molecule fragment with a fixed O- or
+    N-containing group and otherwise delegates to it. No further chemistry
+    is modeled past this first step (radicalizable_sites is always empty),
+    which caps this model's oxidation/amination chemistry at one
+    heteroatom-group addition per radical."""
 
     __slots__ = ("parent",)
     _tag: str = ""
@@ -607,24 +717,38 @@ class _HydrocarbonOxideWrapper:
         return f"Molecule({self.formula()})"
 
 
-class PeroxyRadical(_HydrocarbonOxideWrapper):
+class PeroxyRadical(_HydrocarbonGroupWrapper):
     """R* + O2 -> ROO*"""
     _tag, _suffix, _is_radical = "ROO", "OO•", True
 
 
-class AlkoxyRadical(_HydrocarbonOxideWrapper):
+class AlkoxyRadical(_HydrocarbonGroupWrapper):
     """R* + O* -> RO*"""
     _tag, _suffix, _is_radical = "RO", "O•", True
 
 
-class Hydroperoxide(_HydrocarbonOxideWrapper):
+class Hydroperoxide(_HydrocarbonGroupWrapper):
     """ROO* + H* -> ROOH"""
     _tag, _suffix, _is_radical = "ROOH", "OOH", False
 
 
-class Alcohol(_HydrocarbonOxideWrapper):
+class Alcohol(_HydrocarbonGroupWrapper):
     """RO* + H* (or R* + OH*) -> ROH"""
     _tag, _suffix, _is_radical = "ROH", "OH", False
+
+
+class Amine(_HydrocarbonGroupWrapper):
+    """R* + N* (or R* + NH*) -> R-NH2, in one simplified step.
+
+    Real nitrogen is trivalent, so a chemically rigorous treatment would
+    need an intermediate aminyl-radical stage (like AlkoxyRadical is to
+    Alcohol) before reaching a closed-shell amine. N's odd valence (3)
+    doesn't split as cleanly into "one bond + remaining-valence-as-a-single-
+    radical-site" as O's even valence (2) did, so rather than force an
+    inconsistent intermediate, radical + N-group combination goes directly
+    to the closed-shell amine here. This is the one deliberate valence
+    simplification in the heteroatom wrapper species -- see README."""
+    _tag, _suffix, _is_radical = "RNH2", "NH2", False
 
 
 def _pair(a, b, ta, tb) -> bool:
@@ -667,7 +791,20 @@ def combine(a: Species, b: Species) -> Species | None:
         wrapper = a if isinstance(a, AlkoxyRadical) else b
         return Alcohol(wrapper.parent)
 
-    return None  # not modeled: e.g. two peroxy/alkoxy radicals meeting, OH+O, etc.
+    if _pair(a, b, _AtomicN, _AtomicN):
+        return MOLECULAR_N2
+    if _pair(a, b, _AtomicN, _AtomicH) or _pair(b, a, _AtomicN, _AtomicH):
+        return IMIDOGEN_NH
+    if _pair(a, b, _Imidogen, _AtomicH) or _pair(b, a, _Imidogen, _AtomicH):
+        return MOLECULAR_NH3
+    if _pair(a, b, _AtomicN, Molecule) or _pair(b, a, _AtomicN, Molecule):
+        radical = a if isinstance(a, Molecule) else b
+        return Amine(radical)
+    if _pair(a, b, _Imidogen, Molecule) or _pair(b, a, _Imidogen, Molecule):
+        radical = a if isinstance(a, Molecule) else b
+        return Amine(radical)
+
+    return None  # not modeled: e.g. two peroxy/alkoxy radicals meeting, OH+O, NH+H, etc.
 
 
 # -- seed molecule factories, for choosing the simulation's starting species --

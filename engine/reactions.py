@@ -12,6 +12,22 @@ produce all candidate elementary reactions:
   6. Ozone scavenging        R* + O3 -> RO* + O2                (radical trapped by O3)
   7. Escape                   H2 -> (nothing) / H* -> (nothing)   (irreversible loss to space)
   8. OH disproportionation     OH* + OH* -> H2O + O*                (fixed self-pair)
+  9. Electric discharge         N2 + spark -> 2 N*                    (fixed pair; NOT UV)
+
+Rule 9 is the point of the whole "electricity" knob: N2's triple bond
+(~9.8 eV) is well beyond what UV drives in this model (C-H ~4.5 eV, O2's
+O=O ~5.2 eV) -- no photolysis rate constant, however high, ever touches
+N2. A separate `k_discharge_n2` rate constant represents a qualitatively
+different energy source (electric spark, as in Miller-Urey) that *can*
+reach that bond. Once N* exists, it plugs into the *existing* generic
+combination/abstraction rules for free (nothing N-specific needed there):
+N* + N* -> N2 (recombination), N* + H* -> NH* (imidogen), N* + hydrocarbon
+radical -> a closed-shell amine (R-NH2, skipping the aminyl-radical
+intermediate a fully valence-rigorous treatment would need -- N's valence
+of 3 doesn't split as cleanly as O's valence of 2 into "one bond + one
+radical site", so amine formation is a deliberate one-step simplification;
+see engine/molecule.py). This is a minimal, focused addition -- no N-O
+cross chemistry (real NOx chemistry) is modeled.
 
 H2O also gets a fixed unimolecular photolysis reaction (H2O -> H* + OH*,
 rule 1c below), the real mechanism by which a wet planet's own atmospheric
@@ -66,6 +82,7 @@ from typing import Literal
 
 from .molecule import (
     ATOMIC_H,
+    ATOMIC_N,
     ATOMIC_O,
     AlkoxyRadical,
     HYDROXYL_OH,
@@ -81,7 +98,8 @@ from .molecule import (
 
 ReactionKind = Literal[
     "photolysis", "combination", "abstraction",
-    "o2_scavenging", "ozone_formation", "ozone_scavenging", "escape", "oh_disproportionation",
+    "o2_scavenging", "ozone_formation", "ozone_scavenging", "escape",
+    "oh_disproportionation", "discharge",
 ]
 
 
@@ -152,6 +170,7 @@ def generate_reactions_for_species(
     k_escape_h2: float = 0.0,
     k_escape_h: float = 0.0,
     k_oh_disprop: float = 0.0,
+    k_discharge_n2: float = 0.0,
 ) -> list[Reaction]:
     """Generate all new reactions enabled by `new_species` joining the pool.
 
@@ -220,6 +239,18 @@ def generate_reactions_for_species(
             kind="oh_disproportionation", reactant_ids=reactants, products=products,
             rate_constant=k_oh_disprop, weight=1.0,
             key=_mk_key("oh_disproportionation", reactants, tuple(p.canonical_id() for p in products)),
+        ))
+
+    # 9. Electric discharge: N2 + spark -> 2 N*. Not a photolysis reaction
+    #    (deliberately not folded into rule 1/1b) -- it represents a
+    #    qualitatively different energy source (electricity, not UV) that
+    #    can reach N2's triple bond when k_discharge_n2 is turned on.
+    if new_id == "N2":
+        products = (ATOMIC_N, ATOMIC_N)
+        out.append(Reaction(
+            kind="discharge", reactant_ids=(new_id,), products=products,
+            rate_constant=k_discharge_n2, weight=1.0,
+            key=_mk_key("discharge", (new_id,), tuple(p.canonical_id() for p in products)),
         ))
 
     # 7. Escape: H2 and H* are the lightest species in the system and the
