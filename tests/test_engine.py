@@ -21,6 +21,7 @@ from engine.molecule import (
 from engine.reactions import generate_reactions_for_species
 from engine.simulator import SimParams, Simulator
 from engine.autocatalysis import find_candidate_cycles
+from engine.analysis import chain_length_stats
 
 
 def check(label, cond):
@@ -245,6 +246,45 @@ def test_full_atmosphere_ethane_accumulation():
     check("some ozone actually formed", any(k.startswith("ozone_formation:") for k in result.reaction_fire_counts))
 
 
+def test_chain_length_stats_basic():
+    from engine.molecule import Molecule as _Molecule
+
+    params = SimParams(k_photo=0.05, k_comb=5.0, k_abstr=0.5,
+                        max_carbon=4, t_max=200.0, max_events=5000, sample_every=50, seed=3)
+    sim = Simulator(params)
+    sim.seed_species(methane(), 200)
+    result = sim.run()
+    stats = chain_length_stats(result)
+    check("chain stats mean_carbon is positive", stats.mean_carbon > 0)
+    check("chain stats max_carbon_present <= max_carbon cap", stats.max_carbon_present <= 4)
+    expected_total = sum(n for sid, n in result.counts.items()
+                          if isinstance(result.species.get(sid), _Molecule) and n > 0)
+    check("chain stats counts_by_carbon sums to total hydrocarbon molecule count",
+          sum(stats.counts_by_carbon.values()) == expected_total)
+
+
+def test_higher_uv_yields_longer_chains_at_fixed_time():
+    """Regression test for the UV-vs-chain-length finding: at fixed real
+    simulated time and fixed starting concentration, more UV should produce
+    longer hydrocarbon chains (more radicals in circulation -> radical
+    combination, which scales with [R*]^2, becomes relatively more likely
+    than non-growing abstraction)."""
+    def mean_carbon_after(k_photo):
+        params = SimParams(k_photo=k_photo, k_comb=5.0, k_abstr=0.5,
+                            max_carbon=6, t_max=5.0, max_events=2_000_000, sample_every=1000, seed=5)
+        sim = Simulator(params)
+        sim.seed_species(methane(), 500)
+        result = sim.run()
+        check("run reached t_max (not truncated by max_events)", result.stopped_reason == "t_max reached")
+        return chain_length_stats(result).mean_carbon
+
+    low = mean_carbon_after(0.01)
+    mid = mean_carbon_after(0.05)
+    high = mean_carbon_after(0.2)
+    print(f"  -> mean carbon number at k_photo=0.01/0.05/0.2: {low:.2f} / {mid:.2f} / {high:.2f}")
+    check("mean chain length increases monotonically with UV level", low < mid < high)
+
+
 if __name__ == "__main__":
     test_molecule_formulas()
     test_radicalization_and_combination()
@@ -255,4 +295,6 @@ if __name__ == "__main__":
     test_o2_competes_with_self_combination_for_c2h6()
     test_ozone_formation_photolysis_and_scavenging()
     test_full_atmosphere_ethane_accumulation()
+    test_chain_length_stats_basic()
+    test_higher_uv_yields_longer_chains_at_fixed_time()
     print("\nAll sanity checks passed.")

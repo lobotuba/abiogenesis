@@ -11,8 +11,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from engine.analysis import chain_length_stats
 from engine.autocatalysis import build_flow_graph, find_candidate_cycles
-from engine.molecule import ATMOSPHERIC_GASES, Molecule, SEED_MOLECULES, ethane
+from engine.molecule import ATMOSPHERIC_GASES, Molecule, SEED_MOLECULES, ethane, methane
 from engine.simulator import SimParams, Simulator
 
 st.set_page_config(page_title="Abiogenesis: hydrocarbon photochemistry", layout="wide")
@@ -154,8 +155,9 @@ elif comb_fires > scav_fires * 3:
 else:
     st.info(f"The two pathways are roughly balanced ({comb_fires} self-combination vs {scav_fires} O2/O3 scavenging).")
 
-tab_pop, tab_net, tab_cycles, tab_species = st.tabs(
-    ["Population dynamics", "Reaction network", "Autocatalytic cycles", "Species inventory"]
+tab_pop, tab_chain, tab_net, tab_cycles, tab_species = st.tabs(
+    ["Population dynamics", "Chain-length distribution", "Reaction network",
+     "Autocatalytic cycles", "Species inventory"]
 )
 
 # -- Population dynamics ---------------------------------------------------
@@ -181,6 +183,32 @@ with tab_pop:
     )
     st.plotly_chart(fig, use_container_width=True)
     st.caption("Log-scale y-axis. Only the 12 species that reached the highest peak count are shown.")
+
+# -- Chain-length distribution ------------------------------------------------
+with tab_chain:
+    stats = chain_length_stats(result)
+    cc1, cc2, cc3 = st.columns(3)
+    cc1.metric("Mean carbon number (hydrocarbons)", f"{stats.mean_carbon:.2f}")
+    cc2.metric("Longest chain reached", f"C{stats.max_carbon_present}")
+    cc3.metric("Carbon in C3+ chains", f"{stats.c3plus_carbon_fraction:.1%}")
+
+    if stats.counts_by_carbon:
+        carbons = sorted(stats.counts_by_carbon)
+        fig = go.Figure(go.Bar(
+            x=[f"C{c}" for c in carbons], y=[stats.counts_by_carbon[c] for c in carbons],
+        ))
+        fig.update_layout(
+            yaxis_title="molecule count (log scale)", xaxis_title="carbon chain length",
+            yaxis_type="log", height=420,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "Total molecule count grouped by carbon number, across all hydrocarbon species "
+        "(isomers pooled together) at the end of the run. Longer chains only appear here if "
+        "combination events had enough radical concentration to outrun abstraction's "
+        "radical-hopping -- see the Parameter sweep section below to see how UV level and "
+        "starting concentration each push on this."
+    )
 
 # -- Reaction network -------------------------------------------------------
 with tab_net:
@@ -243,3 +271,77 @@ with tab_species:
     } for sid, sp in result.species.items()]
     df = pd.DataFrame(rows).sort_values("count", ascending=False).reset_index(drop=True)
     st.dataframe(df, use_container_width=True, hide_index=True)
+
+# -- Parameter sweep: concentration x UV level --------------------------------
+st.divider()
+st.header("Parameter sweep: does concentration or UV level grow longer chains?")
+st.caption(
+    "Runs a grid of independent simulations (pure hydrocarbon chemistry, no atmosphere -- "
+    "this isolates the question to the elementary methane-photolysis system) varying "
+    "starting concentration and UV level, holding the same real simulated exposure time "
+    "fixed across every cell. That's the fair comparison: holding *event count* fixed "
+    "instead makes higher concentration look like it suppresses growth, but that's an "
+    "artifact -- a fixed step budget just covers a smaller fraction of a bigger starting "
+    "pool. Uses the k_comb/k_abstr/complexity-ceiling from the sidebar. Larger grids and "
+    "higher concentrations take longer (more molecules -> more events needed to cover the "
+    "same real time) -- this can take up to a minute or so."
+)
+
+sweep_t_max = st.slider("Sweep: fixed exposure time across all cells", 1.0, 20.0, 5.0, step=1.0)
+conc_options = st.multiselect(
+    "Sweep: starting CH4 concentrations", [50, 100, 300, 800, 1500, 3000], default=[100, 300, 800],
+)
+kphoto_options = st.multiselect(
+    "Sweep: UV levels (k_photo)", [0.005, 0.01, 0.05, 0.1, 0.2, 0.4], default=[0.01, 0.05, 0.2],
+)
+run_sweep = st.button("Run sweep", use_container_width=True)
+
+if run_sweep:
+    if not conc_options or not kphoto_options:
+        st.warning("Pick at least one concentration and one UV level.")
+    else:
+        rows = []
+        total = len(conc_options) * len(kphoto_options)
+        progress = st.progress(0.0, text="Running sweep...")
+        for i, conc in enumerate(sorted(conc_options)):
+            for j, kp in enumerate(sorted(kphoto_options)):
+                sweep_params = SimParams(
+                    k_photo=kp, k_comb=k_comb, k_abstr=k_abstr,
+                    max_carbon=max_carbon, t_max=sweep_t_max, max_events=2_000_000,
+                    sample_every=1000, seed=int(seed),
+                )
+                sweep_sim = Simulator(sweep_params)
+                sweep_sim.seed_species(methane(), conc)
+                sweep_result = sweep_sim.run()
+                stats = chain_length_stats(sweep_result)
+                ch4_left = sweep_result.counts.get(methane().canonical_id(), 0) / conc
+                rows.append(dict(
+                    concentration=conc, k_photo=kp, mean_carbon=stats.mean_carbon,
+                    max_carbon=stats.max_carbon_present, c3plus_frac=stats.c3plus_carbon_fraction,
+                    ch4_remaining=ch4_left, events=len(sweep_result.event_log),
+                    stopped=sweep_result.stopped_reason,
+                ))
+                progress.progress((i * len(kphoto_options) + j + 1) / total, text="Running sweep...")
+        progress.empty()
+        st.session_state["sweep_df"] = pd.DataFrame(rows)
+
+if "sweep_df" in st.session_state:
+    sweep_df = st.session_state["sweep_df"]
+    pivot = sweep_df.pivot(index="concentration", columns="k_photo", values="mean_carbon")
+    fig = go.Figure(go.Heatmap(
+        z=pivot.values, x=[str(c) for c in pivot.columns], y=[str(c) for c in pivot.index],
+        colorscale="Viridis", colorbar=dict(title="mean C#"), text=pivot.values,
+        texttemplate="%{text:.2f}",
+    ))
+    fig.update_layout(
+        xaxis_title="k_photo (UV level)", yaxis_title="starting CH4 concentration",
+        height=400, xaxis=dict(type="category"), yaxis=dict(type="category"),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    if any(sweep_df["stopped"] != "t_max reached"):
+        st.warning(
+            "Some sweep cells hit their event cap before reaching the target exposure time "
+            "(see the 'stopped' column) -- their numbers understate how far that cell would "
+            "actually progress. Try a smaller exposure time or fewer/lower concentrations."
+        )
+    st.dataframe(sweep_df, use_container_width=True, hide_index=True)

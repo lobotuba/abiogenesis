@@ -107,6 +107,44 @@ diagnostic, not a rigorous test (true autocatalysis requires showing a
 species's presence *causes* its own faster production, which this doesn't
 prove) -- see Limitations below.
 
+## Chain length: what actually drives longer hydrocarbons?
+
+The app's "Chain-length distribution" tab shows the carbon-number histogram
+for a single run, and the "Parameter sweep" section (`engine/analysis.py` +
+the sweep block in `app.py`) runs a grid of independent simulations varying
+starting CH4 concentration and UV level (`k_photo`) to answer this directly.
+
+**The one thing that matters when comparing runs: hold real simulated time
+fixed, not event count.** Comparing at a fixed number of reaction events
+makes higher concentration look like it *suppresses* chain growth -- but
+that's an artifact: a fixed step budget just covers a smaller fraction of a
+bigger starting pool, since propensities (and therefore how much simulated
+time each event represents) scale with concentration. The sweep tool holds
+`t_max` fixed across every cell for this reason.
+
+With that fair comparison:
+
+- **UV level has a strong, robust effect.** At fixed concentration and fixed
+  exposure time, raising `k_photo` reliably produces longer chains and a
+  higher C3+ carbon fraction (regression-tested in
+  `test_higher_uv_yields_longer_chains_at_fixed_time`). Mechanistically:
+  more UV sustains a higher steady-state radical population, and
+  radical-radical combination (the *only* chain-growing step) scales with
+  `[R*]^2`, so it becomes disproportionately more likely relative to
+  non-growing H-abstraction as the radical pool grows.
+- **Starting concentration alone, surprisingly, barely matters** when
+  compared at the same real exposure time -- mean chain length stayed
+  roughly flat across a 50x concentration range (100 to 5000) in testing.
+  Higher concentration produces *far more total reaction events* in the
+  same time window (bimolecular rates scale with concentration²), but the
+  resulting *distribution shape* (average chain length, % converted) ends
+  up depending mainly on `k_photo * t` and the rate-constant ratios, not on
+  the absolute concentration scale. Caveat: in the tested range, every cell
+  reached the `max_carbon` complexity ceiling almost immediately, so this
+  can't rule out concentration mattering more once chains are allowed to
+  grow past that ceiling -- raise `max_carbon` and re-run the sweep to
+  check.
+
 ## Running it
 
 ```
@@ -241,6 +279,7 @@ engine/
   reactions.py       the reaction rules + Reaction/propensity model
   simulator.py       Gillespie SSA with on-demand reaction-network growth
   autocatalysis.py   realized-flow graph + candidate cycle detection
+  analysis.py         chain-length distribution stats (single-run tab + sweep tool)
 app.py                Streamlit UI
 tests/test_engine.py  sanity checks (no pytest dependency)
 ```
