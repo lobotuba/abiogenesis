@@ -13,6 +13,7 @@ import streamlit as st
 
 from engine.analysis import chain_length_stats
 from engine.autocatalysis import build_flow_graph, find_candidate_cycles
+from engine.formose import RIBOSE_FRACTION_ESTIMATE, FormoseParams, run_formose
 from engine.molecule import ATMOSPHERIC_GASES, Molecule, SEED_MOLECULES, ethane, methane
 from engine.simulator import SimParams, Simulator
 
@@ -504,3 +505,140 @@ if "sweep_df" in st.session_state:
             "actually progress. Try a smaller exposure time or fewer/lower concentrations."
         )
     st.dataframe(sweep_df, use_container_width=True, hide_index=True)
+
+# -- Formose reaction: a path to ribose? --------------------------------------
+st.divider()
+st.header("Formose reaction: a path to ribose?")
+st.caption(
+    "A different chemistry regime entirely: formaldehyde self-condenses via base/mineral-"
+    "catalyzed aldol addition into sugars, including ribose (C5H10O5) -- a required RNA "
+    "building block, and arguably a fairer target than hydrocarbons for 'does life actually "
+    "need this molecule have a plausible abiotic source.' The well-known catch (the 'sugar "
+    "problem'): aldol addition and its reverse (retro-aldol) constantly scramble formaldehyde "
+    "units in and out of sugars of every size, so real formose chemistry produces a mess of "
+    "many sugars, not clean ribose -- and this model tracks sugars only by carbon count, so "
+    "'C5 sugar' means the whole pentose pool (ribose + its stereoisomers), not ribose "
+    f"specifically. See README for the {RIBOSE_FRACTION_ESTIMATE:.0%} literature-style "
+    "estimate used to convert that pool size into a ribose-equivalent number."
+)
+
+fc1, fc2 = st.columns(2)
+with fc1:
+    hcho_count = st.slider("Starting formaldehyde (HCHO) count", 100, 5000, 1000, step=100)
+    k_init = st.slider(
+        "2 HCHO -> glycolaldehyde (k_init)", 0.0, 1.0, 0.01, step=0.01,
+        help="Slow, rate-limiting induction step -- real formose famously has a slow start.",
+    )
+    k_aldol = st.slider("Aldol growth, Cn + HCHO -> C(n+1) (k_aldol)", 0.0, 10.0, 1.0, step=0.1)
+    k_retro_aldol = st.slider(
+        "Retro-aldol, C(n+1) -> Cn + HCHO (k_retro_aldol)", 0.0, 10.0, 0.3, step=0.1,
+        help="Real formose equilibria run both ways -- this reversibility is the heart of the sugar problem.",
+    )
+    k_cannizzaro = st.slider(
+        "Cannizzaro side reaction (k_cannizzaro)", 0.0, 2.0, 0.05, step=0.01,
+        help="2 HCHO -> methanol + formate, a real dead end that competes for formaldehyde.",
+    )
+with fc2:
+    max_sugar_carbon = st.slider("Max sugar size (complexity ceiling)", 4, 10, 8)
+    stabilize_carbon = st.slider(
+        "Which sugar size gets mineral protection", 2, max_sugar_carbon, 5,
+        help="5 = ribose's carbon count.",
+    )
+    k_stabilize = st.slider(
+        "Mineral (borate) stabilization rate (k_stabilize)", 0.0, 5.0, 0.0, step=0.05,
+        help="Off (0) by default -- the 'no mineral rescue' case. Real borate minerals selectively "
+             "bind and protect ribose's ring geometry from further reaction (Ricardo et al., Science "
+             "2004). Turn this on to test whether that's actually what it takes.",
+    )
+    formose_t_max = st.slider("Formose: simulated time", 10.0, 2000.0, 300.0, step=10.0)
+    formose_seed = st.number_input("Formose: random seed", value=7, step=1)
+
+run_formose_clicked = st.button("Run formose simulation", use_container_width=True)
+
+if run_formose_clicked:
+    formose_params = FormoseParams(
+        k_init=k_init, k_aldol=k_aldol, k_retro_aldol=k_retro_aldol, k_cannizzaro=k_cannizzaro,
+        k_stabilize=k_stabilize, stabilize_carbon=stabilize_carbon, max_sugar_carbon=max_sugar_carbon,
+        t_max=formose_t_max, max_events=300_000, sample_every=1000, seed=int(formose_seed),
+    )
+    with st.spinner("Running formose simulation..."):
+        formose_result = run_formose(formose_params, initial_hcho=hcho_count)
+    st.session_state["formose_result"] = formose_result
+    st.session_state["formose_params"] = formose_params
+    st.session_state["formose_stabilize_carbon"] = stabilize_carbon
+
+if "formose_result" in st.session_state:
+    fresult = st.session_state["formose_result"]
+    fparams = st.session_state["formose_params"]
+    fstab_carbon = st.session_state["formose_stabilize_carbon"]
+
+    hcho_now = fresult.counts.get("HCHO", 0)
+    target_sid = f"C{fstab_carbon}sugar"
+    stabilized_sid = f"C{fstab_carbon}sugar-stabilized"
+    free_target = fresult.counts.get(target_sid, 0)
+    stabilized_target = fresult.counts.get(stabilized_sid, 0)
+    ribose_equivalent = round((free_target + stabilized_target) * RIBOSE_FRACTION_ESTIMATE, 1)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("HCHO remaining", hcho_now)
+    m2.metric(f"Free C{fstab_carbon} sugar", free_target)
+    m3.metric(f"Stabilized C{fstab_carbon} sugar", stabilized_target)
+    m4.metric(
+        "Ribose-equivalent estimate", ribose_equivalent,
+        help=f"({free_target} + {stabilized_target}) x {RIBOSE_FRACTION_ESTIMATE:.0%} -- a "
+             "literature-style heuristic, not something the simulation itself resolves (no "
+             "stereochemistry is tracked here).",
+    )
+
+    if fparams.k_stabilize == 0.0:
+        st.info(
+            f"**No mineral rescue**: {free_target} free C{fstab_carbon} sugar exists right now, but "
+            "nothing protects it -- it stays in the same aldol/retro-aldol equilibrium as every other "
+            "sugar size, so it doesn't durably accumulate. Turn on the stabilization rate to test "
+            "whether that's what changes the picture."
+        )
+    elif stabilized_target > 0:
+        st.success(
+            f"**Mineral stabilization works**: {stabilized_target} C{fstab_carbon} sugar molecules have "
+            f"been pulled out of the reactive pool and protected, versus only {free_target} unprotected "
+            "free sugar sitting in the same equilibrium as everything else. This is the Ricardo et al. "
+            "hypothesis in miniature: a rescue mechanism, not the aldol chemistry alone, is what lets a "
+            "persistent ribose-sized pool build up."
+        )
+    else:
+        st.warning("Stabilization is on but nothing has been protected yet -- try a higher rate or longer run.")
+
+    ftab_pop, ftab_dist = st.tabs(["Sugar population over time", "Sugar-size distribution"])
+
+    with ftab_pop:
+        peak = {}
+        for snap in fresult.history_counts:
+            for sid, n in snap.items():
+                peak[sid] = max(peak.get(sid, 0), n)
+        top_ids = sorted(peak, key=peak.get, reverse=True)[:10]
+        rows = []
+        for t, snap in zip(fresult.history_t, fresult.history_counts):
+            for sid in top_ids:
+                rows.append({"t": t, "species": fresult.species[sid].formula(), "count": snap.get(sid, 0)})
+        fdf = pd.DataFrame(rows)
+        fig = go.Figure()
+        for formula, sub in fdf.groupby("species"):
+            fig.add_trace(go.Scatter(x=sub["t"], y=sub["count"], mode="lines", name=formula))
+        fig.update_layout(
+            yaxis_title="molecule count", xaxis_title="time (arbitrary units)",
+            yaxis_type="log", height=450, legend_title="species (top 10 by peak count)",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with ftab_dist:
+        sugar_counts = {f"C{n}": fresult.counts.get(f"C{n}sugar", 0) for n in range(2, fparams.max_sugar_carbon + 1)}
+        if fparams.k_stabilize > 0:
+            sugar_counts[f"C{fstab_carbon} (stabilized)"] = stabilized_target
+        fig2 = go.Figure(go.Bar(x=list(sugar_counts.keys()), y=list(sugar_counts.values())))
+        fig2.update_layout(yaxis_title="molecule count", xaxis_title="sugar size", height=400)
+        st.plotly_chart(fig2, use_container_width=True)
+        st.caption(
+            "Every sugar size is a generic (CH2O)n -- this doesn't distinguish ribose from its "
+            "stereoisomers (arabinose, xylose, lyxose) or from ketopentoses. 'C5 sugar' is the whole "
+            "pentose pool, not ribose specifically."
+        )

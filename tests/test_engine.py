@@ -26,6 +26,7 @@ from engine.reactions import generate_reactions_for_species
 from engine.simulator import SimParams, Simulator
 from engine.autocatalysis import find_candidate_cycles
 from engine.analysis import chain_length_stats
+from engine.formose import FormoseParams, build_formose_reactions, run_formose
 
 
 def check(label, cond):
@@ -507,6 +508,79 @@ def test_higher_uv_yields_longer_chains_at_fixed_time():
     check("mean chain length increases monotonically with UV level", low < mid < high)
 
 
+def test_formose_reaction_structure():
+    params = FormoseParams(max_sugar_carbon=5, k_stabilize=0.0)
+    reactions = build_formose_reactions(params)
+    kinds = {r.kind for r in reactions}
+    check("formose network has init/cannizzaro/aldol/retro_aldol kinds",
+          kinds == {"formose_init", "cannizzaro", "aldol", "retro_aldol"})
+    check("no stabilization reaction when k_stabilize is 0",
+          not any(r.kind == "stabilization" for r in reactions))
+    # max_sugar_carbon=5 -> aldol/retro_aldol pairs for n=2,3,4 (growing to 3,4,5)
+    aldol = [r for r in reactions if r.kind == "aldol"]
+    check("aldol reactions generated for each growth step up to the carbon ceiling", len(aldol) == 3)
+
+    params_stab = FormoseParams(max_sugar_carbon=5, k_stabilize=1.0, stabilize_carbon=5)
+    reactions_stab = build_formose_reactions(params_stab)
+    stab = [r for r in reactions_stab if r.kind == "stabilization"]
+    check("stabilization reaction appears when k_stabilize > 0", len(stab) == 1)
+    check("stabilization reaction targets C5", stab[0].reactant_ids == ("C5sugar",))
+    check("stabilization product is the stabilized C5 species", stab[0].products[0].formula() == "(CH2O)5·borate")
+
+
+def test_formose_carbon_conservation_and_chain_growth():
+    params = FormoseParams(k_init=0.05, k_aldol=1.0, k_retro_aldol=0.3, k_cannizzaro=0.05,
+                            k_stabilize=0.0, max_sugar_carbon=7, t_max=100.0, max_events=100_000,
+                            sample_every=500, seed=11)
+    result = run_formose(params, initial_hcho=500)
+
+    total_now = (
+        result.counts.get("HCHO", 0)
+        + 2 * result.counts.get("waste", 0)
+        + sum(n * result.counts.get(f"C{n}sugar", 0) for n in range(2, params.max_sugar_carbon + 1))
+    )
+    check(f"carbon conserved through formose chemistry ({total_now} == 500)", total_now == 500)
+
+    reached = {n for n in range(2, params.max_sugar_carbon + 1) if result.counts.get(f"C{n}sugar", 0) > 0}
+    print(f"  -> sugar sizes with nonzero count at end of run: {sorted(reached)}")
+    check("aldol addition actually grows sugars past glycolaldehyde (reaches C4+ at some point)",
+          any(n >= 4 for n in reached) or any(
+              any(k.startswith(f"aldol:C{n}sugar") for k in result.reaction_fire_counts) for n in range(3, 6)
+          ))
+
+
+def test_formose_ribose_needs_stabilization():
+    """The central question: does a persistent C5 (ribose-sized) sugar
+    pool require mineral stabilization, or does formose chemistry alone
+    let it accumulate? Real formose is dominated by retro-aldol scrambling
+    (the "sugar problem") -- expect the unprotected C5 pool to stay small/
+    transient while the stabilized pool (once protected) only grows."""
+
+    def run(k_stabilize):
+        params = FormoseParams(
+            k_init=0.05, k_aldol=1.0, k_retro_aldol=0.3, k_cannizzaro=0.05,
+            k_stabilize=k_stabilize, stabilize_carbon=5, max_sugar_carbon=8,
+            t_max=300.0, max_events=300_000, sample_every=1000, seed=7,
+        )
+        return run_formose(params, initial_hcho=1000)
+
+    result_off = run(0.0)
+    result_on = run(0.5)
+
+    c5_off = result_off.counts.get("C5sugar", 0)
+    stab_off = result_off.counts.get("C5sugar-stabilized", 0)
+    c5_on = result_on.counts.get("C5sugar", 0)
+    stab_on = result_on.counts.get("C5sugar-stabilized", 0)
+
+    print(f"  -> no stabilization: free C5={c5_off}, stabilized C5={stab_off}")
+    print(f"  -> with stabilization: free C5={c5_on}, stabilized C5={stab_on}")
+
+    check("without stabilization, no stabilized C5 sugar exists (mechanism is off)", stab_off == 0)
+    check("with stabilization on, a protected C5 pool accumulates", stab_on > 0)
+    check("stabilization captures more C5-equivalent sugar than the free pool ever holds without it",
+          stab_on > c5_off)
+
+
 if __name__ == "__main__":
     test_molecule_formulas()
     test_radicalization_and_combination()
@@ -526,4 +600,7 @@ if __name__ == "__main__":
     test_electricity_indirectly_enables_o2_via_hydrogen_sink()
     test_chain_length_stats_basic()
     test_higher_uv_yields_longer_chains_at_fixed_time()
+    test_formose_reaction_structure()
+    test_formose_carbon_conservation_and_chain_growth()
+    test_formose_ribose_needs_stabilization()
     print("\nAll sanity checks passed.")

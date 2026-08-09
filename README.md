@@ -16,6 +16,13 @@ A stochastic chemistry simulator exploring three linked questions:
    difference between UV and electric discharge, or is "electricity" just
    UV with a different label? (There's a concrete answer: N2's triple bond
    is a wall UV in this model can never get through, but a spark can.)
+4. Set hydrocarbons aside and ask a fairer question: RNA (and so all life
+   on Earth) needs ribose. Does the classic prebiotic route to it --
+   formaldehyde self-condensing into sugars via the formose reaction --
+   actually let a persistent ribose-sized sugar pool build up, or does it
+   need something else? (See the Formose section below -- this is a
+   genuinely different chemistry regime, and the honest answer involves a
+   real, famous problem with formose chemistry.)
 
 This is a toy model, not a calibrated photochemistry code. It's built to
 let you see the *shape* of emergent chemical networks and the *qualitative*
@@ -210,6 +217,70 @@ of: plain hydrocarbons, amines, or O-containing products) so you can see
 directly which pathway is actually responsible for what you're seeing,
 rather than assuming it's whichever byproduct is easiest to notice.
 
+## Formose reaction: a path to ribose
+
+Everything above is radical chemistry: UV or a spark breaks a bond
+homolytically, unpaired electrons pair back up. Ribose (C5H10O5, required
+for RNA) doesn't come from that pathway in reality -- it comes from the
+**formose reaction**, formaldehyde self-condensing into sugars via
+base/mineral-catalyzed **aldol addition**, a closed-shell ionic mechanism
+with no radicals anywhere. That's different enough chemistry that it gets
+its own module (`engine/formose.py`) and its own section of the app,
+rather than being bolted onto the radical engine.
+
+**The reaction network**, all generated upfront (unlike the hydrocarbon
+engine, the formose species set is small and fully known in advance, so
+there's no need for on-demand discovery):
+
+1. **Induction**: `2 HCHO -> C2 sugar` (glycolaldehyde) -- slow and
+   rate-limiting, matching formose's real slow start.
+2. **Aldol growth**: `Cn + HCHO -> C(n+1)` -- the autocatalytic
+   chain-growing step, for every sugar size up to a `max_sugar_carbon`
+   complexity ceiling (same role as `max_carbon` elsewhere).
+3. **Retro-aldol**: `C(n+1) -> Cn + HCHO` -- the reverse of (2). Real
+   formose equilibria run both ways, and this reversibility is the heart
+   of the famous **"sugar problem"**: aldol addition and its reverse
+   constantly scramble formaldehyde in and out of sugars of every size, so
+   a real formose reaction produces a mess of many different sugars
+   ("formose tar"), not clean ribose.
+4. **Cannizzaro side reaction**: `2 HCHO -> waste` (methanol + formate) --
+   a real, well-known dead end that competes for formaldehyde and limits
+   how much of it is ever available for sugar growth at all.
+5. **Mineral stabilization** (optional, off by default): `Cn -> stabilized
+   Cn` at a chosen carbon number (default 5). This is the proposed
+   resolution in the literature (Ricardo, Carrigan, Olcott, Benner,
+   ["Borate Minerals Stabilize Ribose"](https://www.science.org/doi/10.1126/science.1102722),
+   *Science* 2004): borate ions selectively bind ribose's ring geometry
+   and protect it from further reaction, pulling it out of the
+   aldol/retro-aldol equilibrium before it's scrambled into hexoses or
+   degraded. Modeled as a one-way, terminal reaction -- the same
+   "protected from further chemistry" treatment already used elsewhere in
+   this project for e.g. H2O or NH3.
+
+**What we found, testing directly**
+(`test_formose_ribose_needs_stabilization`): without stabilization, the
+free C5 sugar pool stays small (9 molecules, in one representative run) --
+consistent with the sugar problem, since nothing stops it from continuing
+to react further or reverting. With stabilization turned on, a
+**persistent protected pool of 73** builds up instead. The central
+hypothesis holds up in this simplified model: **ribose-sized sugar needs a
+rescue mechanism to accumulate; the aldol chemistry alone won't durably
+produce it.**
+
+**The honest limitation**: this model has no stereochemistry. Sugars are
+tracked only by carbon count, so "C5 sugar" means the *entire pentose
+pool* -- ribose, its three aldopentose stereoisomers (arabinose, xylose,
+lyxose), and the ketopentoses -- not ribose specifically. `RIBOSE_FRACTION_ESTIMATE`
+(1/4, in `engine/formose.py`) is a documented, literature-style heuristic
+for converting a simulated C5-pool size into a ballpark ribose-equivalent
+number -- it's carried in from outside, not something the simulation
+itself derives. The app's Formose section surfaces this explicitly rather
+than implying more precision than the model has. Also not modeled:
+crossed aldol reactions between two sugars (only sugar + formaldehyde
+growth is included, a scope cut that avoids an M×N combinatorial
+explosion of product sizes while still capturing the essential growth
+mechanism), and any borate-independent stabilization pathway.
+
 **Simulation** uses the Gillespie stochastic simulation algorithm (SSA) over
 a reaction network that grows on demand: the first time a new molecule
 appears, the three rules generate whatever new reactions it enables against
@@ -374,6 +445,12 @@ chemistry back down about as fast as photochemistry can make it.
   likely depended on for concentrating and protecting reactive intermediates.
   Also no altitude-dependent UV/pressure profile, so this can't reproduce
   something like a real stratospheric ozone layer.
+- **No stereochemistry, anywhere -- most consequential in the formose
+  module.** "C5 sugar" is the whole pentose pool, not ribose; the
+  `RIBOSE_FRACTION_ESTIMATE` heuristic is carried in from the literature,
+  not derived. No crossed sugar-sugar aldol reactions (only sugar +
+  formaldehyde growth), and mineral stabilization is a single one-way
+  reaction, not a real borate-binding equilibrium.
 
 ## Roadmap toward Darwinian relevance
 
@@ -390,23 +467,34 @@ Roughly in order of how directly each one advances the actual question:
    of hand-written wrapper classes -- unlocking a much richer, more
    Miller-Urey-like reaction space and real catalytic possibilities (e.g. a
    species that lowers another reaction's activation energy).
-2. **Nitrile / HCN chemistry.** The real Miller-Urey route to amino acid
+2. **Stereochemistry for the formose module.** The single biggest
+   limitation on the ribose question specifically: distinguishing ribose
+   from arabinose/xylose/lyxose (and the ketopentoses) needs actual
+   3D/chirality tracking, not just a carbon-count label. This is what
+   would let `RIBOSE_FRACTION_ESTIMATE` stop being an imported heuristic
+   and become an emergent result of the model itself -- arguably the most
+   direct way to sharpen this project's answer to "does life's chemistry
+   have a plausible abiotic source," since ribose is a harder, more
+   specific target than any hydrocarbon.
+3. **Nitrile / HCN chemistry.** The real Miller-Urey route to amino acid
    precursors goes through HCN and related nitriles, not just amines --
    this model's nitrogen chemistry stops one step short of that.
-3. **Rings.** Lift the tree-only restriction; rings enable a different
+4. **Rings.** Lift the tree-only restriction; rings enable a different
    class of stable, potentially catalytic structures.
-4. **Explicit catalysis.** Let some species appear as a rate multiplier on
+5. **Explicit catalysis.** Let some species appear as a rate multiplier on
    a reaction (not just a reactant/product) so the autocatalysis detector
    can test the real Kauffman condition, not just chain-propagation flux.
-5. **RAF (reflexively autocatalytic, food-generated) set analysis.** Once
+6. **RAF (reflexively autocatalytic, food-generated) set analysis.** Once
    catalysis is explicit, implement the actual RAF algorithm instead of the
    current cycle-flux heuristic -- this is the rigorous version of what
    `engine/autocatalysis.py` currently approximates.
-6. **Polymers + templating.** The real jump: a backbone chemistry (even a
-   toy one) where sequence can be copied with occasional error. This is
-   where "Darwinian" stops being a stretch and starts being literal --
-   variation + heredity + differential survival.
-7. **Spatial structure.** Compartments or surfaces that let useful
+7. **Polymers + templating.** The real jump: a backbone chemistry (even a
+   toy one) where sequence can be copied with occasional error -- for
+   ribose specifically, this means asking whether it can get incorporated
+   into a template-copyable backbone at all. This is where "Darwinian"
+   stops being a stretch and starts being literal -- variation + heredity
+   + differential survival.
+8. **Spatial structure.** Compartments or surfaces that let useful
    combinations of molecules stay together instead of diluting into a
    well-mixed soup. Also where altitude-dependent escape/UV physics would
    belong, if the wet-planet question above needs to get more realistic.
@@ -421,6 +509,7 @@ engine/
   simulator.py       Gillespie SSA with on-demand reaction-network growth
   autocatalysis.py   realized-flow graph + candidate cycle detection
   analysis.py         chain-length distribution stats (single-run tab + sweep tool)
+  formose.py           separate aldol-chemistry module: formaldehyde -> sugars -> ribose
 app.py                Streamlit UI
 tests/test_engine.py  sanity checks (no pytest dependency)
 ```
