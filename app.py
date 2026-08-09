@@ -248,6 +248,72 @@ if n2_count > 0:
     else:
         st.warning("Discharge is on but no N2 has dissociated yet -- try a higher rate or longer run.")
 
+    # -- Three-way competition: self-combination vs O2/O3 scavenging vs amination --
+    amine_fires = sum(
+        n for k, n in result.reaction_fire_counts.items()
+        if k.startswith("combination:") and "RNH2:" in k.split("->", 1)[1]
+    )
+    total_carbon = sum(sp.n_carbon * result.counts.get(sid, 0) for sid, sp in result.species.items())
+    hydrocarbon_carbon = sum(
+        sp.n_carbon * result.counts.get(sid, 0) for sid, sp in result.species.items() if isinstance(sp, Molecule)
+    )
+    amine_carbon = sum(
+        sp.n_carbon * result.counts.get(sid, 0) for sid, sp in result.species.items() if sid.startswith("RNH2:")
+    )
+    oxidized_carbon = sum(
+        sp.n_carbon * result.counts.get(sid, 0) for sid, sp in result.species.items()
+        if sid.startswith(("ROO:", "RO:", "ROOH:", "ROH:"))
+    )
+
+    st.subheader("Three-way competition: where do hydrocarbon radicals actually go?")
+    st.caption(
+        "Every hydrocarbon radical has up to three fates: combine with another hydrocarbon "
+        "radical (grows a chain), get scavenged by O2/O3 (oxidized product), or combine with "
+        "N*/NH* (amine). Electricity doesn't touch water chemistry directly, but nitrogen "
+        "fixation consumes H* (locking it into NH3/amines), which starves the H* + OH* -> H2O "
+        "recombination that normally keeps a closed system oxidant-free -- so electricity can "
+        "indirectly produce a little O2/O3 even with hydrogen escape off, as a side effect."
+    )
+    fc1, fc2, fc3 = st.columns(3)
+    fc1.metric("Self-combination events", comb_fires)
+    fc2.metric("O2/O3 scavenging events", scav_fires)
+    fc3.metric("Amine-forming events", amine_fires)
+
+    if total_carbon > 0:
+        fig = go.Figure(go.Bar(
+            x=["Plain hydrocarbons", "Amines (N)", "Oxidized (O)"],
+            y=[hydrocarbon_carbon, amine_carbon, oxidized_carbon],
+            marker_color=["#2a6fdb", "#2ca02c", "#d62728"],
+        ))
+        fig.update_layout(yaxis_title="carbon atoms currently held", height=350)
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            f"{hydrocarbon_carbon}/{total_carbon} ({hydrocarbon_carbon/total_carbon:.0%}) of all carbon is in "
+            f"plain hydrocarbons, {amine_carbon}/{total_carbon} ({amine_carbon/total_carbon:.0%}) in amines, "
+            f"{oxidized_carbon}/{total_carbon} ({oxidized_carbon/total_carbon:.0%}) in O-containing products."
+        )
+
+    if k_discharge_n2 > 0 and h2o_count > 0:
+        disprop_fires = sum(n for k, n in result.reaction_fire_counts.items()
+                             if k.startswith("oh_disproportionation:"))
+        h2_now = result.counts.get("H2", 0)
+        h_now = result.counts.get("H", 0)
+        if amine_fires > max(comb_fires, scav_fires) * 1.5:
+            st.warning(
+                f"**Nitrogen fixation dominates** ({amine_fires} amine-forming events vs {comb_fires} "
+                f"self-combination and {scav_fires} O2/O3 scavenging) -- this, not the {o3_now} O3 that "
+                "formed as a side effect, is what's actually suppressing other molecules. H2/H* remaining: "
+                f"{h2_now}/{h_now} -- nitrogen fixation has consumed the hydrogen that would otherwise "
+                f"reform H2O, which is why {disprop_fires} OH-disproportionation events fired and produced "
+                "free O atoms even with hydrogen escape off."
+            )
+        elif disprop_fires > 0:
+            st.info(
+                f"{disprop_fires} OH-disproportionation events fired ({o3_now} O3 now) -- nitrogen fixation "
+                "is providing a small hydrogen-sink effect here, but hasn't come to dominate the radical "
+                "pool the way it can at higher discharge rates or longer run times."
+            )
+
 tab_pop, tab_chain, tab_net, tab_cycles, tab_species = st.tabs(
     ["Population dynamics", "Chain-length distribution", "Reaction network",
      "Autocatalytic cycles", "Species inventory"]

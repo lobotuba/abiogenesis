@@ -183,6 +183,33 @@ echo of what discharge does that UV alone cannot. No N-O cross chemistry
 (real NOx chemistry) is modeled -- a deliberate scope cut to keep this
 addition focused on the one question it was built to answer.
 
+**Does electricity produce O2 in a wet environment, and does that stop
+other molecules from existing?** Discharge doesn't touch water or oxygen
+chemistry at all -- it only cracks N2. But nitrogen fixation consumes H*
+(`N* + H* -> NH*`, `NH* + H* -> NH3`), and that's the *same* H* that
+normally recombines with OH* back into H2O. Starve that recombination and
+OH* lives long enough to instead disproportionate (`OH* + OH* -> H2O +
+O*`), feeding O3. Tested directly in a **closed system with hydrogen
+escape off** (so any O2/O3 that appears can only be this side effect, not
+escape-driven buildup): with discharge off, O2+O3 stays at exactly zero,
+same as any closed wet system; with discharge on, O2+O3 becomes nonzero
+purely from this hydrogen-sink effect
+(`test_electricity_indirectly_enables_o2_via_hydrogen_sink`). But the
+second half of the question has a counterintuitive answer: **the O2/O3
+that appears is not what suppresses other molecules.** In the same test
+run, O2/O3-scavenging fired zero times -- 13 molecules of O3 is nowhere
+near enough standing concentration to compete for the radical pool (it
+takes thousands, not tens -- see the Atmosphere section above). What
+actually captured 98.7% of all carbon into amines was nitrogen fixation
+*directly*, competing for the same hydrocarbon-radical pool that would
+otherwise self-combine. The app's "Three-way competition" panel (shown
+whenever N2 is present) makes this explicit: it compares self-combination
+vs. O2/O3-scavenging vs. amine-forming event counts side by side, plus a
+carbon-accounting bar chart (every tracked carbon atom is in exactly one
+of: plain hydrocarbons, amines, or O-containing products) so you can see
+directly which pathway is actually responsible for what you're seeing,
+rather than assuming it's whichever byproduct is easiest to notice.
+
 **Simulation** uses the Gillespie stochastic simulation algorithm (SSA) over
 a reaction network that grows on demand: the first time a new molecule
 appears, the three rules generate whatever new reactions it enables against

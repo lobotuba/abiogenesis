@@ -421,6 +421,53 @@ def test_electricity_cracks_n2_but_uv_alone_never_does():
           amine_formed)
 
 
+def test_electricity_indirectly_enables_o2_via_hydrogen_sink():
+    """Follow-up finding: discharge doesn't touch water/O2 chemistry at all
+    (it only cracks N2), but nitrogen fixation consumes H* (into NH3/amines),
+    starving the H* + OH* -> H2O recombination that normally keeps a closed
+    system oxidant-free. So a CLOSED system (no hydrogen escape) should still
+    show more O2+O3 with discharge on than off, purely as a side effect --
+    and that carbon should end up in three clean, mutually exclusive buckets:
+    plain hydrocarbons, amines, and O-containing oxidation products."""
+    from engine.molecule import Molecule as _Molecule
+
+    def run(k_discharge):
+        params = SimParams(
+            k_photo=0.05, k_comb=5.0, k_abstr=0.5, k_discharge_n2=k_discharge,
+            # no k_escape_h2/k_escape_h at all -- closed system on purpose
+            max_carbon=4, t_max=100.0, max_events=1_000_000, sample_every=2000, seed=23,
+        )
+        sim = Simulator(params)
+        sim.seed_species(methane(), 300)
+        sim.seed_species(MOLECULAR_H2O, 300)
+        sim.seed_species(MOLECULAR_N2, 300)
+        return sim.run()
+
+    result_off = run(0.0)
+    result_on = run(3.0)
+    o2o3_off = result_off.counts.get("O2", 0) + result_off.counts.get("O3", 0)
+    o2o3_on = result_on.counts.get("O2", 0) + result_on.counts.get("O3", 0)
+    print(f"  -> closed system, discharge off: O2+O3={o2o3_off}")
+    print(f"  -> closed system, discharge on:  O2+O3={o2o3_on}")
+    check("discharge off, closed system: zero free O2/O3 (matches the no-N2 wet-planet result)",
+          o2o3_off == 0)
+    check("discharge on, closed system: some free O2/O3 appears purely as a hydrogen-sink side effect",
+          o2o3_on > 0)
+
+    # Carbon accounting: every carbon atom is in exactly one of three buckets.
+    total_carbon = sum(sp.n_carbon * result_on.counts.get(sid, 0) for sid, sp in result_on.species.items())
+    hydrocarbon_carbon = sum(sp.n_carbon * result_on.counts.get(sid, 0) for sid, sp in result_on.species.items()
+                              if isinstance(sp, _Molecule))
+    amine_carbon = sum(sp.n_carbon * result_on.counts.get(sid, 0) for sid, sp in result_on.species.items()
+                        if sid.startswith("RNH2:"))
+    oxidized_carbon = sum(sp.n_carbon * result_on.counts.get(sid, 0) for sid, sp in result_on.species.items()
+                           if sid.startswith(("ROO:", "RO:", "ROOH:", "ROH:")))
+    check(f"hydrocarbon + amine + oxidized carbon accounts for all {total_carbon} carbon atoms",
+          hydrocarbon_carbon + amine_carbon + oxidized_carbon == total_carbon)
+    check("with discharge on, nitrogen fixation captured the large majority of carbon",
+          amine_carbon > total_carbon * 0.5)
+
+
 def test_chain_length_stats_basic():
     from engine.molecule import Molecule as _Molecule
 
@@ -476,6 +523,7 @@ if __name__ == "__main__":
     test_nitrogen_chemistry_combinations()
     test_discharge_reaction_generation_and_uv_cannot_touch_n2()
     test_electricity_cracks_n2_but_uv_alone_never_does()
+    test_electricity_indirectly_enables_o2_via_hydrogen_sink()
     test_chain_length_stats_basic()
     test_higher_uv_yields_longer_chains_at_fixed_time()
     print("\nAll sanity checks passed.")
