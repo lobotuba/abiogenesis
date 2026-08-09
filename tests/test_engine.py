@@ -27,6 +27,18 @@ from engine.simulator import SimParams, Simulator
 from engine.autocatalysis import find_candidate_cycles
 from engine.analysis import chain_length_stats
 from engine.formose import PENTOSE_DIASTEREOMERS, FormoseParams, build_formose_reactions, run_formose
+from engine.nucleotide import (
+    ANHYDRONUCLEOSIDE,
+    CYANAMIDE,
+    CYANOACETYLENE,
+    GLYCERALDEHYDE,
+    GLYCOLALDEHYDE,
+    PHOSPHATE,
+    RIBONUCLEOTIDE,
+    NucleotideParams,
+    build_nucleotide_reactions,
+    run_nucleotide,
+)
 
 
 def check(label, cond):
@@ -640,6 +652,69 @@ def test_formose_ribose_selectivity_is_a_real_correction_factor():
           counts_selective["ribose"] > counts_unselective["ribose"])
 
 
+def test_nucleotide_reaction_structure():
+    reactions = build_nucleotide_reactions(NucleotideParams(k_photo_destroy=1.0))
+    kinds = {r.kind for r in reactions}
+    check("nucleotide network has all expected reaction kinds", kinds == {
+        "oxazole_formation", "aminooxazoline_formation", "photo_selection",
+        "anhydro_formation", "offpathway_consumption", "phosphorylation",
+    })
+    check("aminooxazoline formation splits into all 4 diastereomers",
+          len([r for r in reactions if r.kind == "aminooxazoline_formation"]) == 4)
+    check("photo_selection only touches the 3 non-ribo diastereomers (ribo is photostable)",
+          {r.reactant_ids[0] for r in reactions if r.kind == "photo_selection"}
+          == {"aminooxazoline-arabinose", "aminooxazoline-xylose", "aminooxazoline-lyxose"})
+    check("only ribo-aminooxazoline reacts productively with cyanoacetylene",
+          [r for r in reactions if r.kind == "anhydro_formation"][0].reactant_ids
+          == tuple(sorted(("aminooxazoline-ribose", "cyanoacetylene"))))
+    check("the 3 non-ribo diastereomers also consume cyanoacetylene, but unproductively",
+          len([r for r in reactions if r.kind == "offpathway_consumption"]) == 3)
+
+    reactions_off = build_nucleotide_reactions(NucleotideParams(k_photo_destroy=0.0))
+    check("photo_selection reactions still exist at k_photo_destroy=0 (present but inert)",
+          len([r for r in reactions_off if r.kind == "photo_selection"]) == 3)
+    check("k_photo_destroy=0 means zero propensity for photo_selection",
+          all(r.rate_constant == 0.0 for r in reactions_off if r.kind == "photo_selection"))
+
+
+def test_nucleotide_forms_and_photoselection_protects_scarce_cyanoacetylene():
+    """The central question: does the photochemical selection step actually
+    matter for nucleotide yield? It's tempting to assume selection helps by
+    recycling material back to reactants, but it doesn't (photolysis isn't
+    a retro-reaction) -- what it actually does is stop the 3 non-ribo
+    diastereomers from wastefully consuming cyanoacetylene, which only
+    shows up when cyanoacetylene is the scarce reagent (seeded lower than
+    the aminooxazoline pool it competes against) and destruction is fast
+    relative to that competing bimolecular consumption."""
+
+    def run(k_photo_destroy):
+        params = NucleotideParams(
+            k_oxazole=1.0, k_aminooxazoline=1.0, k_photo_destroy=k_photo_destroy,
+            k_anhydro=1.0, k_phosphorylate=1.0, t_max=50.0, max_events=200_000,
+            sample_every=1000, seed=11,
+        )
+        init = {
+            GLYCOLALDEHYDE.canonical_id(): 2000,
+            GLYCERALDEHYDE.canonical_id(): 2000,
+            CYANAMIDE.canonical_id(): 2000,
+            CYANOACETYLENE.canonical_id(): 500,  # deliberately scarce relative to the aminooxazoline pool
+            PHOSPHATE.canonical_id(): 2000,
+        }
+        return run_nucleotide(params, init)
+
+    result_off = run(0.0)
+    result_on = run(2000.0)  # must be fast relative to k_anhydro * initial [cyanoacetylene] (~500) to win
+    nuc_off = result_off.counts.get(RIBONUCLEOTIDE.canonical_id(), 0)
+    nuc_on = result_on.counts.get(RIBONUCLEOTIDE.canonical_id(), 0)
+    print(f"  -> no selection: ribonucleotide={nuc_off}")
+    print(f"  -> selection on: ribonucleotide={nuc_on}")
+
+    check("some nucleotide forms even without selection (the pathway works at all)", nuc_off > 0)
+    check("fast photochemical selection substantially increases nucleotide yield "
+          "by protecting scarce cyanoacetylene from the unproductive diastereomers",
+          nuc_on > nuc_off * 1.5)
+
+
 if __name__ == "__main__":
     test_molecule_formulas()
     test_radicalization_and_combination()
@@ -664,4 +739,6 @@ if __name__ == "__main__":
     test_formose_ribose_needs_stabilization()
     test_formose_stereoisomer_tracking_structure()
     test_formose_ribose_selectivity_is_a_real_correction_factor()
+    test_nucleotide_reaction_structure()
+    test_nucleotide_forms_and_photoselection_protects_scarce_cyanoacetylene()
     print("\nAll sanity checks passed.")

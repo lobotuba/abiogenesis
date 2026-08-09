@@ -15,6 +15,16 @@ from engine.analysis import chain_length_stats
 from engine.autocatalysis import build_flow_graph, find_candidate_cycles
 from engine.formose import PENTOSE_DIASTEREOMERS, RIBOSE_FRACTION_ESTIMATE, FormoseParams, run_formose
 from engine.molecule import ATMOSPHERIC_GASES, Molecule, SEED_MOLECULES, ethane, methane
+from engine.nucleotide import (
+    CYANAMIDE,
+    CYANOACETYLENE,
+    GLYCERALDEHYDE,
+    GLYCOLALDEHYDE,
+    PHOSPHATE,
+    RIBONUCLEOTIDE,
+    NucleotideParams,
+    run_nucleotide,
+)
 from engine.simulator import SimParams, Simulator
 
 st.set_page_config(page_title="Abiogenesis: hydrocarbon photochemistry", layout="wide")
@@ -730,3 +740,147 @@ if "formose_result" in st.session_state:
                 "stereoisomers (arabinose, xylose, lyxose) or from ketopentoses. 'C5 sugar' is the whole "
                 "pentose pool, not ribose specifically."
             )
+
+# -- Nucleotide pathway: skipping the sugar problem entirely ------------------
+st.divider()
+st.header("Nucleotide pathway: skip free ribose entirely")
+st.caption(
+    "A different, more direct route than 'make ribose, then attach a base to it': Powner, "
+    "Gerland & Sutherland (Nature, 2009). Attach the nucleobase precursor to the sugar chain "
+    "*before* the ribose-defining stereocenters even form, so there's no free-sugar mixture to "
+    "purify ribose out of. Starts from glycolaldehyde + glyceraldehyde -- the same early formose "
+    "intermediates as the section above, before the sugar problem has any chance to develop -- "
+    "plus cyanamide, cyanoacetylene, and phosphate. The pathway: "
+    "glycolaldehyde + cyanamide -> 2-aminooxazole -> (+ glyceraldehyde) 4 diastereomeric "
+    "aminooxazolines (unselective, like formose's aldol step) -> only the ribo-configured one "
+    "reacts productively with cyanoacetylene -> anhydronucleoside -> (+ phosphate) an activated "
+    "ribonucleotide."
+)
+
+nc1, nc2 = st.columns(2)
+with nc1:
+    glycolaldehyde_count = st.slider("Starting glycolaldehyde", 100, 5000, 2000, step=100)
+    glyceraldehyde_count = st.slider("Starting glyceraldehyde", 100, 5000, 2000, step=100)
+    cyanamide_count = st.slider("Starting cyanamide", 100, 5000, 2000, step=100)
+    cyanoacetylene_count = st.slider(
+        "Starting cyanoacetylene", 50, 5000, 500, step=50,
+        help="Real cyanoacetylene is a scarcer, more special photochemical product than simple "
+             "sugars -- default it lower than the others so it's the reagent selection actually protects.",
+    )
+    phosphate_count = st.slider("Starting phosphate", 100, 5000, 2000, step=100)
+with nc2:
+    k_oxazole = st.slider("Glycolaldehyde + cyanamide -> aminooxazole (k_oxazole)", 0.0, 10.0, 1.0, step=0.1)
+    k_aminooxazoline = st.slider("Aminooxazole + glyceraldehyde -> aminooxazoline (k_aminooxazoline)", 0.0, 10.0, 1.0, step=0.1)
+    k_anhydro = st.slider("Aminooxazoline + cyanoacetylene -> anhydro(nucleoside) (k_anhydro)", 0.0, 10.0, 1.0, step=0.1)
+    k_phosphorylate = st.slider("Anhydronucleoside + phosphate -> ribonucleotide (k_phosphorylate)", 0.0, 10.0, 1.0, step=0.1)
+    k_photo_destroy = st.slider(
+        "Photochemical selection against non-ribo diastereomers (k_photo_destroy)", 0.0, 3000.0, 0.0, step=50.0,
+        help="Off (0) by default. Real ribo-configured aminooxazoline is photostable while its 3 "
+             "stereoisomers are destroyed by UV (the actual Sutherland finding). Needs to be fast "
+             "relative to k_anhydro x [cyanoacetylene] to actually win the competition for it -- "
+             "try values in the hundreds to thousands with the defaults above.",
+    )
+    nucleotide_t_max = st.slider("Nucleotide: simulated time", 5.0, 500.0, 50.0, step=5.0)
+    nucleotide_seed = st.number_input("Nucleotide: random seed", value=11, step=1)
+
+run_nucleotide_clicked = st.button("Run nucleotide simulation", use_container_width=True)
+
+if run_nucleotide_clicked:
+    nuc_params = NucleotideParams(
+        k_oxazole=k_oxazole, k_aminooxazoline=k_aminooxazoline, k_photo_destroy=k_photo_destroy,
+        k_anhydro=k_anhydro, k_phosphorylate=k_phosphorylate,
+        t_max=nucleotide_t_max, max_events=300_000, sample_every=1000, seed=int(nucleotide_seed),
+    )
+    nuc_init = {
+        GLYCOLALDEHYDE.canonical_id(): glycolaldehyde_count,
+        GLYCERALDEHYDE.canonical_id(): glyceraldehyde_count,
+        CYANAMIDE.canonical_id(): cyanamide_count,
+        CYANOACETYLENE.canonical_id(): cyanoacetylene_count,
+        PHOSPHATE.canonical_id(): phosphate_count,
+    }
+    with st.spinner("Running nucleotide simulation..."):
+        nuc_result = run_nucleotide(nuc_params, nuc_init)
+    st.session_state["nuc_result"] = nuc_result
+    st.session_state["nuc_params"] = nuc_params
+
+if "nuc_result" in st.session_state:
+    nresult = st.session_state["nuc_result"]
+    nparams = st.session_state["nuc_params"]
+
+    nucleotide_now = nresult.counts.get(RIBONUCLEOTIDE.canonical_id(), 0)
+    offpathway_fires = sum(n for k, n in nresult.reaction_fire_counts.items() if k.startswith("offpathway_consumption:"))
+    productive_fires = sum(n for k, n in nresult.reaction_fire_counts.items() if k.startswith("anhydro_formation:"))
+    destroyed = sum(n for k, n in nresult.reaction_fire_counts.items() if k.startswith("photo_selection:"))
+
+    n1, n2, n3, n4 = st.columns(4)
+    n1.metric("Ribonucleotide formed", nucleotide_now)
+    n2.metric("Cyanoacetylene used productively", productive_fires)
+    n3.metric("Cyanoacetylene wasted off-pathway", offpathway_fires)
+    n4.metric("Non-ribo diastereomers destroyed", destroyed)
+
+    if nparams.k_photo_destroy == 0.0:
+        st.info(
+            "**No photochemical selection**: all 4 aminooxazoline diastereomers compete equally for "
+            "cyanoacetylene, so most of it is wasted on the 3 non-productive branches. The pathway still "
+            "works -- some nucleotide forms -- just inefficiently."
+        )
+    elif offpathway_fires == 0 and productive_fires > 0:
+        st.success(
+            "**Selection wins decisively**: the non-ribo diastereomers were destroyed fast enough that "
+            "essentially none of the scarce cyanoacetylene was wasted on them -- it all went toward "
+            "actual nucleotide formation. This is the real mechanism: selection doesn't recycle material "
+            "back to reactants, it protects a scarce downstream resource from being spent on dead ends."
+        )
+    elif productive_fires > offpathway_fires:
+        st.success(
+            f"**Selection is helping**: {productive_fires} productive uses of cyanoacetylene vs "
+            f"{offpathway_fires} wasted -- raise k_photo_destroy further (relative to k_anhydro x "
+            "[cyanoacetylene]) to win more decisively."
+        )
+    else:
+        st.warning(
+            f"Selection is on but still losing the race ({offpathway_fires} wasted vs {productive_fires} "
+            "productive) -- k_photo_destroy needs to be fast relative to k_anhydro x [cyanoacetylene] "
+            "to actually protect it; try a higher rate."
+        )
+
+    ntab_pop, ntab_funnel = st.tabs(["Population over time", "Where did the material go?"])
+
+    with ntab_pop:
+        peak = {}
+        for snap in nresult.history_counts:
+            for sid, n in snap.items():
+                peak[sid] = max(peak.get(sid, 0), n)
+        top_ids = sorted(peak, key=peak.get, reverse=True)[:10]
+        rows = []
+        for t, snap in zip(nresult.history_t, nresult.history_counts):
+            for sid in top_ids:
+                rows.append({"t": t, "species": nresult.species[sid].formula(), "count": snap.get(sid, 0)})
+        ndf = pd.DataFrame(rows)
+        fig3 = go.Figure()
+        for formula, sub in ndf.groupby("species"):
+            fig3.add_trace(go.Scatter(x=sub["t"], y=sub["count"], mode="lines", name=formula))
+        fig3.update_layout(
+            yaxis_title="molecule count", xaxis_title="time (arbitrary units)",
+            yaxis_type="log", height=450, legend_title="species (top 10 by peak count)",
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+
+    with ntab_funnel:
+        funnel = {
+            "Ribonucleotide (productive)": nucleotide_now,
+            "Anhydronucleoside (in transit)": nresult.counts.get("anhydronucleoside", 0),
+            "Ribo-aminooxazoline (unreacted)": nresult.counts.get("aminooxazoline-ribose", 0),
+            "Off-pathway adduct (wasted)": nresult.counts.get("nuc-offpathway-adduct", 0),
+            "Photo-destroyed (non-ribo)": nresult.counts.get("nuc-photo-waste", 0),
+            "Non-ribo aminooxazoline (unreacted)": sum(
+                nresult.counts.get(f"aminooxazoline-{v}", 0) for v in ("arabinose", "xylose", "lyxose")
+            ),
+        }
+        fig4 = go.Figure(go.Bar(x=list(funnel.keys()), y=list(funnel.values())))
+        fig4.update_layout(yaxis_title="molecule count", height=420)
+        st.plotly_chart(fig4, use_container_width=True)
+        st.caption(
+            "Where the carbon that entered the aminooxazoline stage ended up: productive (nucleotide "
+            "or on its way), wasted (off-pathway adduct or photo-destroyed), or still waiting to react."
+        )

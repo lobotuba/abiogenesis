@@ -1,6 +1,6 @@
 # Abiogenesis: from methane photolysis to autocatalytic networks
 
-A stochastic chemistry simulator exploring three linked questions:
+A stochastic chemistry simulator exploring five linked questions:
 
 1. Starting from UV photolysis of methane (CH4 + hv -> CH3• + H•), and
    letting the resulting radical chemistry grow in complexity on its own,
@@ -23,6 +23,14 @@ A stochastic chemistry simulator exploring three linked questions:
    need something else? (See the Formose section below -- this is a
    genuinely different chemistry regime, and the honest answer involves a
    real, famous problem with formose chemistry.)
+5. Push past ribose to an actual nucleotide, using a route that never
+   needs free ribose to exist at all: attach the nucleobase precursor to
+   the sugar chain *before* the ribose-defining stereocenters even form.
+   Does a photochemical selection step actually matter for how much
+   nucleotide forms, and if so, *why* -- is it really about rescuing
+   material, or about something else? (See the Nucleotide section below --
+   the honest answer surprised the model's own author partway through
+   building it.)
 
 This is a toy model, not a calibrated photochemistry code. It's built to
 let you see the *shape* of emergent chemical networks and the *qualitative*
@@ -295,15 +303,14 @@ ribose fraction is now something the simulation actually produces from an
 adjustable, chemically-motivated variable, not a number typed in after the
 fact.
 
-**A different, more radical real answer worth knowing about (not built
-here):** Sutherland et al.'s 2009 *Nature* paper ("Synthesis of activated
-pyrimidine ribonucleotides in prebiotically plausible conditions") sidesteps
-the sugar problem entirely rather than solving it -- ribose and the
-nucleobase are synthesized *together* from glycolaldehyde and cyanamide,
-with unwanted diastereomers destroyed by UV along the way, so free ribose
-never needs to exist and be purified on its own. That's a fundamentally
-different pathway, not a parameter tweak, and a natural candidate for a
-future module if this project pushes further toward nucleotides.
+**A different, more radical real answer, now built as its own module
+(see the Nucleotide section below):** Sutherland et al.'s 2009 *Nature*
+paper ("Synthesis of activated pyrimidine ribonucleotides in prebiotically
+plausible conditions") sidesteps the sugar problem entirely rather than
+solving it -- ribose and the nucleobase are synthesized *together* from
+glycolaldehyde and cyanamide, with unwanted diastereomers destroyed by UV
+along the way, so free ribose never needs to exist and be purified on its
+own. That's a fundamentally different pathway, not a parameter tweak.
 
 **Still not modeled**: full 3D stereochemistry beyond the one tracked
 tier (real formose stereochemistry starts mattering from C3 onward, not
@@ -312,6 +319,72 @@ formaldehyde growth is included, a scope cut that avoids an M×N
 combinatorial explosion of product sizes while still capturing the
 essential growth mechanism), and any borate-independent stabilization
 pathway.
+
+## Nucleotide pathway: skipping the sugar problem entirely
+
+The formose module's answer to "does ribose accumulate" was "only with a
+rescue mechanism." This module asks a sharper version of the same
+question by using a route that never produces free ribose to begin with
+(`engine/nucleotide.py`, Powner, Gerland & Sutherland, *Nature* 2009):
+attach the nucleobase precursor to the sugar chain *before* the
+ribose-defining stereocenters even form, so there's no free-sugar mixture
+to purify ribose out of in the first place.
+
+**The reaction network**, again fully known upfront:
+
+1. Glycolaldehyde + cyanamide -> 2-aminooxazole. Glycolaldehyde is
+   literally `Sugar(2)` imported from `engine/formose.py` -- this pathway
+   branches off the *same* earliest formose intermediate, before the sugar
+   problem has any chance to develop.
+2. 2-aminooxazole + glyceraldehyde (`Sugar(3)`) -> one of 4 diastereomeric
+   aminooxazolines (ribo-/arabino-/xylo-/lyxo-configured), formed with
+   equal likelihood -- reusing the exact same "unselective aldol-type
+   step, real stereoselectivity enters later" logic as the formose
+   module's stereoisomer tracking.
+3. **Photochemical selection** (off by default): the real, documented
+   Sutherland finding is that ribo-configured aminooxazoline is
+   photostable while its 3 stereoisomers are destroyed by UV at the
+   wavelength used. Modeled as a photolysis reaction touching only the 3
+   non-ribo variants.
+4. Ribo-aminooxazoline + cyanoacetylene -> anhydronucleoside (productive).
+   The 3 non-ribo diastereomers, if not removed by step 3, react with
+   cyanoacetylene at the same rate -- just unproductively, into a dead-end
+   adduct.
+5. Anhydronucleoside + phosphate -> an activated pyrimidine ribonucleotide.
+
+**What we found, testing directly -- including a wrong first guess,
+caught by testing it**: the obvious hypothesis is that photochemical
+selection helps by "rescuing" material -- destroy the losers, leave more
+raw material for the winner. Building it that way first
+(no reaction 4 competition, just destruction) produced *no difference at
+all* in final nucleotide yield with selection on vs. off, which is what
+exposed the actual mechanism: photolysis doesn't run the aldol step
+backwards, so destroying a diastereomer doesn't free up any
+glyceraldehyde or aminooxazole to make more of the productive one. The
+branching ratio into ribo- is fixed the moment the aminooxazoline forms
+(rule 2); nothing downstream changes that number.
+
+What selection *actually* does, once reaction 4's competition for
+cyanoacetylene is included: it protects a **scarce downstream resource**
+from being wasted on unproductive branches. Cyanoacetylene is genuinely
+the special, scarce reagent in this pathway (seeded lower than the sugar
+precursors in the app's defaults, matching its real prebiotic scarcity
+relative to simple sugars). Tested directly
+(`test_nucleotide_forms_and_photoselection_protects_scarce_cyanoacetylene`):
+with no selection, cyanoacetylene splits ~1-in-4 to the productive branch
+like anything else, yielding 121 ribonucleotide in one run; with fast
+selection (`k_photo_destroy` large relative to
+`k_anhydro x [cyanoacetylene]` -- selection has to *win the kinetic race*,
+not just be present), yield triples to 300, with the non-ribo diastereomers
+destroyed before they get a chance to consume any cyanoacetylene at all.
+**The mechanism is protection of a scarce resource, not recycling of a
+diluted one** -- a real distinction this project only found by building
+the wrong version first and noticing the result didn't move.
+
+**Not modeled**: the exact real-world numeric yields, the intermediate
+anhydronucleoside/hydrolysis chemistry Sutherland's actual synthesis needs
+several more steps for, and (same limitation as formose) real 3D
+stereochemistry -- these are named diastereomer labels, not geometry.
 
 **Simulation** uses the Gillespie stochastic simulation algorithm (SSA) over
 a reaction network that grows on demand: the first time a new molecule
@@ -511,29 +584,34 @@ Roughly in order of how directly each one advances the actual question:
    one carbon number. Real geometry (so the model could in principle
    *derive* rather than assume which sugars borate should prefer) and
    tracking through more of the carbon ladder (real stereochemistry starts
-   at C3) are the natural next steps. The bigger structural alternative is
-   the Sutherland systems-chemistry pathway noted in the Formose section
-   above -- sidestepping free-ribose synthesis entirely rather than trying
-   to purify it out of a mixture.
-3. **Nitrile / HCN chemistry.** The real Miller-Urey route to amino acid
+   at C3) are the natural next steps. The bigger structural alternative,
+   sidestepping free-ribose synthesis entirely, is now built -- see the
+   Nucleotide pathway section above.
+3. **Beyond the activated ribonucleotide.** The nucleotide module stops at
+   one activated pyrimidine ribonucleotide -- polymerizing multiple
+   nucleotides into an actual RNA strand (and asking whether that process
+   can be templated/copied) is the natural next step, and where this
+   project's two central questions -- self-amplifying networks (roadmap-
+   adjacent to item 1's original goal) and a plausible route to ribose --
+   would finally meet.
+4. **Nitrile / HCN chemistry.** The real Miller-Urey route to amino acid
    precursors goes through HCN and related nitriles, not just amines --
    this model's nitrogen chemistry stops one step short of that.
-4. **Rings.** Lift the tree-only restriction; rings enable a different
+5. **Rings.** Lift the tree-only restriction; rings enable a different
    class of stable, potentially catalytic structures.
-5. **Explicit catalysis.** Let some species appear as a rate multiplier on
+6. **Explicit catalysis.** Let some species appear as a rate multiplier on
    a reaction (not just a reactant/product) so the autocatalysis detector
    can test the real Kauffman condition, not just chain-propagation flux.
-6. **RAF (reflexively autocatalytic, food-generated) set analysis.** Once
+7. **RAF (reflexively autocatalytic, food-generated) set analysis.** Once
    catalysis is explicit, implement the actual RAF algorithm instead of the
    current cycle-flux heuristic -- this is the rigorous version of what
    `engine/autocatalysis.py` currently approximates.
-7. **Polymers + templating.** The real jump: a backbone chemistry (even a
-   toy one) where sequence can be copied with occasional error -- for
-   ribose specifically, this means asking whether it can get incorporated
-   into a template-copyable backbone at all. This is where "Darwinian"
-   stops being a stretch and starts being literal -- variation + heredity
-   + differential survival.
-8. **Spatial structure.** Compartments or surfaces that let useful
+8. **Polymers + templating.** The real jump: a backbone chemistry (even a
+   toy one) where sequence can be copied with occasional error -- item 3
+   above (polymerizing nucleotides) is the concrete first instance of this.
+   This is where "Darwinian" stops being a stretch and starts being
+   literal -- variation + heredity + differential survival.
+9. **Spatial structure.** Compartments or surfaces that let useful
    combinations of molecules stay together instead of diluting into a
    well-mixed soup. Also where altitude-dependent escape/UV physics would
    belong, if the wet-planet question above needs to get more realistic.
@@ -549,6 +627,9 @@ engine/
   autocatalysis.py   realized-flow graph + candidate cycle detection
   analysis.py         chain-length distribution stats (single-run tab + sweep tool)
   formose.py           separate aldol-chemistry module: formaldehyde -> sugars -> ribose
+  nucleotide.py         separate module: glycolaldehyde/glyceraldehyde + cyanamide/
+                         cyanoacetylene/phosphate -> activated ribonucleotide, skipping
+                         free ribose entirely (imports Sugar from formose.py)
 app.py                Streamlit UI
 tests/test_engine.py  sanity checks (no pytest dependency)
 ```
