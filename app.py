@@ -25,6 +25,7 @@ from engine.nucleotide import (
     NucleotideParams,
     run_nucleotide,
 )
+from engine.polymer import DUPLEX, FRAGMENT, TEMPLATE, PolymerParams, run_polymer
 from engine.simulator import SimParams, Simulator
 
 st.set_page_config(page_title="Abiogenesis: hydrocarbon photochemistry", layout="wide")
@@ -883,4 +884,149 @@ if "nuc_result" in st.session_state:
         st.caption(
             "Where the carbon that entered the aminooxazoline stage ended up: productive (nucleotide "
             "or on its way), wasted (off-pathway adduct or photo-destroyed), or still waiting to react."
+        )
+
+# -- Polymerization: does templated self-replication actually amplify? -------
+st.divider()
+st.header("Beyond the monomer: does copying itself amplify?")
+st.caption(
+    "Modeled on von Kiedrowski's 1986 self-replicating hexanucleotide -- the first experimentally "
+    "demonstrated minimal template-directed self-replicator. Activated ribonucleotides (from the "
+    "section above) spontaneously join into short FRAGMENTs (trimers), which spontaneously ligate "
+    "into a self-complementary TEMPLATE (a hexamer -- its own two halves are each a copy of a "
+    "FRAGMENT). The trick: an *existing* TEMPLATE can hybridize two FRAGMENTs side by side and "
+    "template their ligation into a brand new TEMPLATE -- one species acting as substrate, catalyst, "
+    "and product at once. But that same self-pairing lets two TEMPLATEs hybridize with EACH OTHER "
+    "into an inert duplex, sequestering both out of circulation until it melts back apart. This is "
+    "the real, famous, counterintuitive finding this section exists to reproduce: does template-"
+    "directed replication actually run away, or does the same chemistry that makes it work also cap it?"
+)
+
+pc1, pc2 = st.columns(2)
+with pc1:
+    ribonucleotide_food = st.slider("Starting activated ribonucleotide", 100, 6000, 3000, step=100)
+    template_seed = st.slider(
+        "Seed TEMPLATE count (a rare first copy)", 0, 50, 0, step=1,
+        help="With 0, a TEMPLATE must first arise from background ligation alone before templated "
+             "ligation has anything to catalyze off of. A small nonzero seed explores 'given a rare "
+             "first copy already exists, what happens next' instead.",
+    )
+    k_oligomerize = st.slider("3 ribonucleotide -> FRAGMENT (k_oligomerize)", 0.0, 0.1, 0.01, step=0.005, format="%.3f")
+    k_background = st.slider("FRAGMENT + FRAGMENT -> TEMPLATE, uncatalyzed (k_background)", 0.0, 0.1, 0.01, step=0.005, format="%.3f")
+with pc2:
+    k_template = st.slider(
+        "Templated ligation: FRAGMENT + FRAGMENT + TEMPLATE -> 2 TEMPLATE (k_template)", 0.0, 10.0, 0.0, step=0.1,
+        help="Off (0) by default -- the 'no autocatalysis' baseline. This is a genuinely termolecular "
+             "reaction (3 reactants at once).",
+    )
+    k_duplex = st.slider(
+        "TEMPLATE + TEMPLATE -> duplex, self-inhibition (k_duplex)", 0.0, 5.0, 0.0, step=0.1,
+        help="Off (0) by default. Not a penalty bolted on from outside -- the same base-pairing "
+             "chemistry that makes k_template work, acting on two product strands instead.",
+    )
+    k_melt = st.slider("Duplex -> 2 TEMPLATE, strand separation (k_melt)", 0.0, 2.0, 0.0, step=0.05)
+    polymer_t_max = st.slider("Polymerization: simulated time", 5.0, 500.0, 100.0, step=5.0)
+    polymer_seed = st.number_input("Polymerization: random seed", value=13, step=1)
+
+run_polymer_clicked = st.button("Run polymerization simulation", use_container_width=True)
+
+if run_polymer_clicked:
+    poly_params = PolymerParams(
+        k_oligomerize=k_oligomerize, k_background=k_background, k_template=k_template,
+        k_duplex=k_duplex, k_melt=k_melt,
+        t_max=polymer_t_max, max_events=300_000, sample_every=1000, seed=int(polymer_seed),
+    )
+    poly_init = {
+        RIBONUCLEOTIDE.canonical_id(): ribonucleotide_food,
+        TEMPLATE.canonical_id(): template_seed,
+    }
+    with st.spinner("Running polymerization simulation..."):
+        poly_result = run_polymer(poly_params, poly_init)
+    st.session_state["poly_result"] = poly_result
+    st.session_state["poly_params"] = poly_params
+
+if "poly_result" in st.session_state:
+    presult = st.session_state["poly_result"]
+    pparams = st.session_state["poly_params"]
+
+    ribo_left = presult.counts.get(RIBONUCLEOTIDE.canonical_id(), 0)
+    fragment_left = presult.counts.get(FRAGMENT.canonical_id(), 0)
+    active_template = presult.counts.get(TEMPLATE.canonical_id(), 0)
+    duplex_now = presult.counts.get(DUPLEX.canonical_id(), 0)
+    template_equivalent = active_template + 2 * duplex_now
+    templated_fires = sum(n for k, n in presult.reaction_fire_counts.items() if k.startswith("templated_ligation:"))
+    background_fires = sum(n for k, n in presult.reaction_fire_counts.items() if k.startswith("background_ligation:"))
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Active (single-strand) TEMPLATE", active_template)
+    p2.metric("Duplex (sequestered)", duplex_now)
+    p3.metric("Templated ligation events", templated_fires)
+    p4.metric("Background ligation events", background_fires)
+
+    if pparams.k_template == 0.0:
+        st.info(
+            "**No autocatalysis**: templated ligation is off, so any TEMPLATE present only came from "
+            "slow, uncatalyzed background ligation (or the seed count). Turn on k_template to let an "
+            "existing TEMPLATE start catalyzing its own copying."
+        )
+    elif pparams.k_duplex == 0.0:
+        st.success(
+            f"**Autocatalysis running with no self-inhibition modeled**: {templated_fires} templated "
+            f"ligation events vs {background_fires} background events -- most TEMPLATE formation is "
+            "autocatalytic. In real chemistry the same self-complementarity that enables this would "
+            "also let TEMPLATE pair with itself (turn on k_duplex below to see what that does)."
+        )
+    elif template_equivalent > 0 and active_template / template_equivalent < 0.3:
+        st.warning(
+            f"**Self-inhibition dominates**: only {active_template / template_equivalent:.0%} of all the "
+            f"template-equivalent material produced ({active_template} of {template_equivalent}) is still "
+            "catalytically active single-stranded TEMPLATE -- the rest sequestered itself into inert "
+            "duplex. This is von Kiedrowski's real 1986 finding: a minimal template-directed "
+            "self-replicator doesn't grow exponentially, because the very self-pairing that lets it "
+            "copy itself also lets its own product shut it down. Raise k_melt to reintroduce active "
+            "template from the duplex reservoir."
+        )
+    else:
+        st.info(
+            f"**Autocatalysis on, self-inhibition present but not dominant yet**: "
+            f"{active_template} of {template_equivalent} template-equivalent units are still "
+            "catalytically active. Raise k_duplex (or lower k_melt) to push toward the self-limited regime."
+        )
+
+    ptab_pop, ptab_funnel = st.tabs(["Population over time", "Where did the material go?"])
+
+    with ptab_pop:
+        peak = {}
+        for snap in presult.history_counts:
+            for sid, n in snap.items():
+                peak[sid] = max(peak.get(sid, 0), n)
+        top_ids = sorted(peak, key=peak.get, reverse=True)[:10]
+        rows = []
+        for t, snap in zip(presult.history_t, presult.history_counts):
+            for sid in top_ids:
+                rows.append({"t": t, "species": presult.species[sid].formula(), "count": snap.get(sid, 0)})
+        pdf = pd.DataFrame(rows)
+        fig5 = go.Figure()
+        for formula, sub in pdf.groupby("species"):
+            fig5.add_trace(go.Scatter(x=sub["t"], y=sub["count"], mode="lines", name=formula))
+        fig5.update_layout(
+            yaxis_title="molecule count", xaxis_title="time (arbitrary units)",
+            yaxis_type="log", height=450, legend_title="species (top 10 by peak count)",
+        )
+        st.plotly_chart(fig5, use_container_width=True)
+
+    with ptab_funnel:
+        funnel_poly = {
+            "Ribonucleotide (unreacted)": ribo_left,
+            "Fragment (unreacted)": fragment_left,
+            "Active template (single strand)": active_template,
+            "Duplex (sequestered, counts as 2 template each)": duplex_now,
+        }
+        fig6 = go.Figure(go.Bar(x=list(funnel_poly.keys()), y=list(funnel_poly.values())))
+        fig6.update_layout(yaxis_title="molecule count", height=420)
+        st.plotly_chart(fig6, use_container_width=True)
+        st.caption(
+            "Every reaction here is a pure reorganization of ribonucleotide units (1 per monomer, 3 "
+            "per fragment, 6 per template, 12 per duplex) -- none are created or destroyed, so this "
+            "bar chart (converted to those units) always sums back to the starting ribonucleotide count."
         )

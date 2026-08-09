@@ -1,6 +1,6 @@
 # Abiogenesis: from methane photolysis to autocatalytic networks
 
-A stochastic chemistry simulator exploring five linked questions:
+A stochastic chemistry simulator exploring six linked questions:
 
 1. Starting from UV photolysis of methane (CH4 + hv -> CH3• + H•), and
    letting the resulting radical chemistry grow in complexity on its own,
@@ -31,6 +31,14 @@ A stochastic chemistry simulator exploring five linked questions:
    material, or about something else? (See the Nucleotide section below --
    the honest answer surprised the model's own author partway through
    building it.)
+6. Push past a single monomer to an actual strand, and ask the question
+   this whole project started with -- self-amplification -- again, now
+   that there's finally something strand-like to copy: does a minimal
+   template-directed self-replicator (modeled on von Kiedrowski's real
+   1986 self-replicating hexanucleotide) actually amplify itself, or does
+   the same chemistry that lets it copy itself also cap how far that can
+   go? (See the Polymerization section below -- the real answer is
+   famous, and it's not the one "autocatalysis" makes it sound like.)
 
 This is a toy model, not a calibrated photochemistry code. It's built to
 let you see the *shape* of emergent chemical networks and the *qualitative*
@@ -405,6 +413,91 @@ diagnostic, not a rigorous test (true autocatalysis requires showing a
 species's presence *causes* its own faster production, which this doesn't
 prove) -- see Limitations below.
 
+## Polymerization: does copying itself actually amplify?
+
+The nucleotide module stops at one finished, activated monomer. This
+module (`engine/polymer.py`) asks the question this whole project started
+with -- self-amplification -- one more time, now that there's finally
+something strand-like to copy. It's modeled directly on von Kiedrowski,
+"A Self-Replicating Hexadeoxynucleotide" (*Nature*, 1986): the first
+experimentally demonstrated minimal template-directed self-replicator.
+
+**The reaction network**, same generic-species, no-explicit-sequence
+abstraction level as the nucleotide module:
+
+1. Oligomerization: 3 activated ribonucleotides (`nucleotide.RIBONUCLEOTIDE`,
+   imported directly -- this pathway starts exactly where that module ends)
+   spontaneously join into a FRAGMENT (a trimer). Deliberately slow/weak by
+   default: condensation reactions release water, and in bulk solution
+   that makes uncatalyzed ligation thermodynamically uphill -- the real
+   difficulty behind why biological polymers need help forming at all.
+2. Background ligation: two FRAGMENTs join into a TEMPLATE (a hexamer),
+   equally slow and uncatalyzed -- the "no templating exists yet" baseline.
+3. **Templated ligation, the point of this module**: two FRAGMENTs plus an
+   *existing* TEMPLATE ligate into two TEMPLATEs. The old TEMPLATE isn't
+   consumed -- it's a genuine catalyst, so this reaction is autocatalytic
+   by construction. TEMPLATE is modeled as self-complementary (its own two
+   halves are each a copy of FRAGMENT) -- one species acting as substrate,
+   catalyst, and product simultaneously, which is the actual trick behind
+   von Kiedrowski's real minimal self-replicator.
+4. **Duplex formation, the other point of this module**: the same
+   self-complementarity that lets one TEMPLATE catalyze step 3 also lets
+   two TEMPLATEs hybridize with EACH OTHER into an inert double-stranded
+   DUPLEX -- a dead end until it melts back apart. This isn't a penalty
+   bolted on from outside; it's mechanistically the same base-pairing
+   chemistry as step 3, just acting on two product strands instead of a
+   product and two fragments.
+5. Duplex melting: DUPLEX -> 2 TEMPLATE, a slow reverse (thermal
+   denaturation / wet-dry or day-night cycling in the real system),
+   reintroducing catalytically active single strands.
+
+**This needed a real three-reactant reaction** (step 3: two FRAGMENTs and
+a TEMPLATE all at once), which the engine didn't support --
+`Reaction.propensity` in `engine/reactions.py` special-cased exactly one
+or two reactants by hand. It was generalized to a single formula: for each
+distinct reactant id appearing with multiplicity *m* in a reaction, the
+number of ways to draw *m* molecules of it from the current pool is
+`comb(n, m)`; multiply those across all distinct ids. This is a strict
+generalization -- it reduces to the exact old `n`, `n_a * n_b`, and
+`n_a*(n_a-1)/2` arithmetic for every reaction already in the project
+(verified directly in `test_reaction_propensity_generalizes_to_n_body`),
+and now supports genuinely termolecular reactions too.
+
+**What we found, tested directly**: turning on templated ligation (step 3)
+measurably speeds up TEMPLATE accumulation relative to background ligation
+alone -- in one test, background ligation alone reached 26 TEMPLATE in a
+fixed time window while the templated pathway reached 102 in the same
+window (`test_polymer_templating_accelerates_strand_formation`). That's
+real autocatalysis, not just a label for it.
+
+But turning on duplex formation (step 4) reveals von Kiedrowski's actual,
+famous, counterintuitive result: in one test run
+(`test_polymer_duplex_formation_causes_self_inhibition`), duplex-off and
+duplex-on both fully converted the same 1000-FRAGMENT pool into
+502 template-equivalent units -- but with duplex off, all 502 stayed
+active, single-stranded TEMPLATE; with duplex on, **0** stayed active and
+251 ended up locked away as inert duplex. Duplex formation doesn't reduce
+how much ligation chemistry happens -- it's mass-conserving, verified
+exactly by `test_polymer_mass_conservation` (1 ribonucleotide-unit per
+monomer, 3 per fragment, 6 per template, 12 per duplex, constant at every
+sampled point of a run) -- it just locks up the catalyst as fast as the
+catalyst makes more of itself. This is the real reason minimal
+template-directed self-replicators like von Kiedrowski's show *parabolic*
+(roughly square-root-of-time) growth instead of exponential/Malthusian
+growth: the very self-pairing that lets a strand copy itself is what
+increasingly sequesters it out of solution as its own concentration rises.
+So the honest answer to this project's founding question, now that there's
+finally something strand-like to copy, is: yes, template-directed
+self-amplification is real and measurable here -- but it is not
+unconditional. The same mechanism that enables it structurally caps it.
+
+**Not modeled**: explicit sequence/base-pairing (FRAGMENT and TEMPLATE are
+tracked only by length, the same abstraction nucleotide.py uses), a
+mismatch/error-rate model for copying fidelity, and anything past a single
+self-complementary replicator -- competing or cooperating strand
+populations, which is where the interesting Darwinian-selection questions
+about replicators actually live (see Roadmap).
+
 ## Chain length: what actually drives longer hydrocarbons?
 
 The app's "Chain-length distribution" tab shows the carbon-number histogram
@@ -533,14 +626,16 @@ chemistry back down about as fast as photochemistry can make it.
   `engine/autocatalysis.py` are chain-*propagation* loops (a radical
   carrier gets regenerated), which is real and relevant but a weaker claim
   than "autocatalytic set" in the Kauffman sense.
-- **No heredity.** Darwinian evolution needs variation that is copied with
-  error (so selection has something to act on across generations). Nothing
-  here stores or transmits sequence information; there's no polymer, no
-  template-directed replication. This model tests whether the *substrate*
-  (a complex, cyclic reaction network) is reachable from simple starting
-  chemistry, and whether a given product's *concentration* is favored or
-  disfavored by the surrounding chemistry -- not a claim that replication
-  itself emerges.
+- **Heredity, partially.** `engine/polymer.py` now has genuine
+  template-directed replication (see Polymerization section above) -- but
+  it's a single self-complementary replicator species with no explicit
+  sequence, so there's no *variation* for selection to act on yet: nothing
+  here can currently represent two different replicator "genotypes"
+  competing, or copying with occasional error. This model can now show a
+  template being copied faster than background chemistry alone, and being
+  self-limited by its own product -- but not yet differential survival
+  *between distinct heritable variants*, which is what "Darwinian" strictly
+  requires. See Roadmap item 3.
 - **Rates are relative, not physical.** Don't read absolute timescales or
   yields as predictions about real methane/atmosphere photochemistry.
   Concentration *ratios* and which pathway dominates are the meaningful
@@ -587,13 +682,21 @@ Roughly in order of how directly each one advances the actual question:
    at C3) are the natural next steps. The bigger structural alternative,
    sidestepping free-ribose synthesis entirely, is now built -- see the
    Nucleotide pathway section above.
-3. **Beyond the activated ribonucleotide.** The nucleotide module stops at
-   one activated pyrimidine ribonucleotide -- polymerizing multiple
-   nucleotides into an actual RNA strand (and asking whether that process
-   can be templated/copied) is the natural next step, and where this
-   project's two central questions -- self-amplifying networks (roadmap-
-   adjacent to item 1's original goal) and a plausible route to ribose --
-   would finally meet.
+3. **Beyond the activated ribonucleotide -- now built, and revealing the
+   next question.** `engine/polymer.py` polymerizes the activated
+   ribonucleotide into a self-complementary, template-copying strand
+   (modeled on von Kiedrowski's 1986 minimal self-replicator -- see
+   Polymerization section above), which is where this project's two
+   central questions -- self-amplifying networks (item 1's original goal)
+   and a plausible route to ribose -- finally met. What it doesn't have
+   yet, and what's now the most direct remaining path to "Darwinian" in
+   the literal sense: explicit sequence (not just strand length), a
+   copying-fidelity/error-rate model (the actual source of heritable
+   *variation*), and populations of multiple, distinct replicator
+   sequences that can compete or cooperate -- so a real question like "does
+   a faster-copying variant outcompete a slower one" becomes something this
+   model could actually test, rather than something only one replicator
+   species exists to ask about.
 4. **Nitrile / HCN chemistry.** The real Miller-Urey route to amino acid
    precursors goes through HCN and related nitriles, not just amines --
    this model's nitrogen chemistry stops one step short of that.
@@ -606,12 +709,7 @@ Roughly in order of how directly each one advances the actual question:
    catalysis is explicit, implement the actual RAF algorithm instead of the
    current cycle-flux heuristic -- this is the rigorous version of what
    `engine/autocatalysis.py` currently approximates.
-8. **Polymers + templating.** The real jump: a backbone chemistry (even a
-   toy one) where sequence can be copied with occasional error -- item 3
-   above (polymerizing nucleotides) is the concrete first instance of this.
-   This is where "Darwinian" stops being a stretch and starts being
-   literal -- variation + heredity + differential survival.
-9. **Spatial structure.** Compartments or surfaces that let useful
+8. **Spatial structure.** Compartments or surfaces that let useful
    combinations of molecules stay together instead of diluting into a
    well-mixed soup. Also where altitude-dependent escape/UV physics would
    belong, if the wet-planet question above needs to get more realistic.
@@ -630,6 +728,10 @@ engine/
   nucleotide.py         separate module: glycolaldehyde/glyceraldehyde + cyanamide/
                          cyanoacetylene/phosphate -> activated ribonucleotide, skipping
                          free ribose entirely (imports Sugar from formose.py)
+  polymer.py             separate module: ribonucleotide -> fragment -> a
+                         self-complementary, template-copying strand (von Kiedrowski
+                         1986 minimal self-replicator; imports RIBONUCLEOTIDE from
+                         nucleotide.py)
 app.py                Streamlit UI
 tests/test_engine.py  sanity checks (no pytest dependency)
 ```

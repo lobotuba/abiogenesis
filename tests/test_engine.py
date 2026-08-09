@@ -22,7 +22,7 @@ from engine.molecule import (
     methane,
     propane,
 )
-from engine.reactions import generate_reactions_for_species
+from engine.reactions import Reaction, generate_reactions_for_species
 from engine.simulator import SimParams, Simulator
 from engine.autocatalysis import find_candidate_cycles
 from engine.analysis import chain_length_stats
@@ -38,6 +38,14 @@ from engine.nucleotide import (
     NucleotideParams,
     build_nucleotide_reactions,
     run_nucleotide,
+)
+from engine.polymer import (
+    DUPLEX,
+    FRAGMENT,
+    TEMPLATE,
+    PolymerParams,
+    build_polymer_reactions,
+    run_polymer,
 )
 
 
@@ -715,6 +723,160 @@ def test_nucleotide_forms_and_photoselection_protects_scarce_cyanoacetylene():
           nuc_on > nuc_off * 1.5)
 
 
+def test_reaction_propensity_generalizes_to_n_body():
+    """Reaction.propensity used to hand-special-case 1 vs 2 reactants. It
+    was generalized to a Counter-based comb(n, multiplicity) product to
+    support polymer.py's genuine 3-reactant templated-ligation step. This
+    checks the generalization reduces to the exact old arithmetic for
+    unimolecular and both bimolecular shapes, and gets termolecular cases
+    right too (both all-distinct and repeated-species)."""
+    unimolecular = Reaction(kind="x", reactant_ids=("A",), products=(), rate_constant=2.0, weight=1.0, key="u")
+    check("unimolecular: k * weight * n", unimolecular.propensity({"A": 5}) == 2.0 * 5)
+
+    bimolecular_distinct = Reaction(kind="x", reactant_ids=("A", "B"), products=(), rate_constant=2.0, weight=1.0, key="bd")
+    check("bimolecular distinct species: k * weight * nA * nB",
+          bimolecular_distinct.propensity({"A": 5, "B": 3}) == 2.0 * 5 * 3)
+
+    bimolecular_same = Reaction(kind="x", reactant_ids=("A", "A"), products=(), rate_constant=2.0, weight=1.0, key="bs")
+    check("bimolecular same species: k * weight * nA*(nA-1)/2",
+          bimolecular_same.propensity({"A": 5}) == 2.0 * (5 * 4 / 2.0))
+    check("bimolecular same species with only 1 present: zero propensity (can't pick a pair)",
+          bimolecular_same.propensity({"A": 1}) == 0.0)
+
+    termolecular_distinct = Reaction(kind="x", reactant_ids=("A", "B", "C"), products=(), rate_constant=1.0, weight=1.0, key="td")
+    check("termolecular, 3 distinct species: k * weight * nA * nB * nC",
+          termolecular_distinct.propensity({"A": 5, "B": 3, "C": 2}) == 1.0 * 5 * 3 * 2)
+
+    termolecular_repeated = Reaction(kind="x", reactant_ids=("A", "A", "B"), products=(), rate_constant=1.0, weight=1.0, key="tr")
+    check("termolecular, 2 copies of A + 1 B: k * weight * comb(nA,2) * nB",
+          termolecular_repeated.propensity({"A": 5, "B": 3}) == 1.0 * (5 * 4 / 2.0) * 3)
+    check("termolecular, 2 copies of A but only 1 present: zero propensity",
+          termolecular_repeated.propensity({"A": 1, "B": 3}) == 0.0)
+
+
+def test_polymer_reaction_structure():
+    reactions = build_polymer_reactions(PolymerParams(k_template=1.0, k_duplex=1.0, k_melt=1.0))
+    kinds = {r.kind for r in reactions}
+    check("polymer network has all expected reaction kinds", kinds == {
+        "oligomerization", "background_ligation", "templated_ligation",
+        "duplex_formation", "duplex_melting",
+    })
+
+    oligo = next(r for r in reactions if r.kind == "oligomerization")
+    check("oligomerization consumes 3 ribonucleotides", oligo.reactant_ids == (RIBONUCLEOTIDE.canonical_id(),) * 3)
+    check("oligomerization produces one FRAGMENT", oligo.products == (FRAGMENT,))
+
+    templated = next(r for r in reactions if r.kind == "templated_ligation")
+    check("templated_ligation is genuinely termolecular: 2 FRAGMENT + 1 TEMPLATE",
+          sorted(templated.reactant_ids) == sorted((FRAGMENT.canonical_id(), FRAGMENT.canonical_id(), TEMPLATE.canonical_id())))
+    check("templated_ligation produces 2 TEMPLATE (the existing one regenerated, plus a new copy)",
+          templated.products == (TEMPLATE, TEMPLATE))
+
+    duplex_form = next(r for r in reactions if r.kind == "duplex_formation")
+    check("duplex_formation consumes 2 TEMPLATE", duplex_form.reactant_ids == (TEMPLATE.canonical_id(), TEMPLATE.canonical_id()))
+    check("duplex_formation produces DUPLEX", duplex_form.products == (DUPLEX,))
+
+    melt = next(r for r in reactions if r.kind == "duplex_melting")
+    check("duplex_melting reverses duplex_formation", melt.reactant_ids == (DUPLEX.canonical_id(),) and melt.products == (TEMPLATE, TEMPLATE))
+
+
+def test_polymer_mass_conservation():
+    """Every reaction in this module is a pure reorganization of
+    ribonucleotide units (1 per RIBONUCLEOTIDE, 3 per FRAGMENT, 6 per
+    TEMPLATE, 12 per DUPLEX) -- nothing is created or destroyed. That
+    conserved quantity should equal the initial seeded ribonucleotide count
+    at every sampled point in the run, the same correctness technique used
+    for carbon accounting elsewhere in this project."""
+    params = PolymerParams(k_oligomerize=0.02, k_background=0.02, k_template=1.0,
+                            k_duplex=0.5, k_melt=0.05, t_max=200.0, max_events=200_000,
+                            sample_every=500, seed=5)
+    initial_ribo = 3000
+    result = run_polymer(params, {RIBONUCLEOTIDE.canonical_id(): initial_ribo, TEMPLATE.canonical_id(): 2})
+    initial_units = initial_ribo + 2 * 6  # the 2 seed TEMPLATE count as 6 units each
+
+    for snap in result.history_counts:
+        total = (snap.get(RIBONUCLEOTIDE.canonical_id(), 0) * 1
+                 + snap.get(FRAGMENT.canonical_id(), 0) * 3
+                 + snap.get(TEMPLATE.canonical_id(), 0) * 6
+                 + snap.get(DUPLEX.canonical_id(), 0) * 12)
+        check(f"ribonucleotide-unit total conserved at every sampled point (got {total}, want {initial_units})",
+              total == initial_units)
+    print(f"  -> conserved at {len(result.history_counts)} sampled points, final state: {result.counts}")
+
+
+def test_polymer_templating_accelerates_strand_formation():
+    """The core autocatalysis question: does adding the templated pathway
+    actually make TEMPLATE accumulate faster than background ligation
+    alone, within a fixed time window? (Given infinite time a closed
+    fragment pool eventually fully converts either way -- the real
+    signature of autocatalysis is rate, not final yield, so this compares
+    at a fixed t_max rather than waiting for exhaustion.)"""
+
+    def run(k_template):
+        params = PolymerParams(k_oligomerize=0.0, k_background=0.0002, k_template=k_template,
+                                k_duplex=0.0, k_melt=0.0, t_max=10.0, max_events=200_000,
+                                sample_every=1000, seed=9)
+        init = {FRAGMENT.canonical_id(): 200, TEMPLATE.canonical_id(): 2}
+        return run_polymer(params, init)
+
+    result_off = run(0.0)
+    result_on = run(2.0)
+    tmpl_off = result_off.counts.get(TEMPLATE.canonical_id(), 0)
+    tmpl_on = result_on.counts.get(TEMPLATE.canonical_id(), 0)
+    print(f"  -> background ligation only: template={tmpl_off}")
+    print(f"  -> templated (autocatalytic) pathway on: template={tmpl_on}")
+
+    check("background ligation alone still produces some template (the pathway works without templating)",
+          tmpl_off > 0)
+    check("the templated pathway accumulates template far faster within the same time window",
+          tmpl_on > tmpl_off * 2)
+
+
+def test_polymer_duplex_formation_causes_self_inhibition():
+    """Von Kiedrowski's real, counterintuitive 1986 finding: the same
+    self-complementarity that makes TEMPLATE able to catalyze its own
+    formation also lets two TEMPLATEs hybridize with each other, taking
+    both out of circulation as inert DUPLEX. This checks that turning on
+    duplex formation collapses the catalytically-active (single-stranded)
+    TEMPLATE pool, while the total amount of material that got converted
+    out of FRAGMENT (active TEMPLATE + 2*DUPLEX, i.e. "how much ligation
+    chemistry actually happened") stays the same -- i.e. duplex formation
+    doesn't reduce how much gets made, it just locks up what already
+    formed."""
+
+    def run(k_duplex):
+        params = PolymerParams(k_oligomerize=0.0, k_background=0.01, k_template=2.0,
+                                k_duplex=k_duplex, k_melt=0.0, t_max=100.0, max_events=300_000,
+                                sample_every=1000, seed=13)
+        init = {FRAGMENT.canonical_id(): 1000, TEMPLATE.canonical_id(): 2}
+        return run_polymer(params, init)
+
+    result_off = run(0.0)
+    result_on = run(1.0)
+
+    frag_left_off = result_off.counts.get(FRAGMENT.canonical_id(), 0)
+    frag_left_on = result_on.counts.get(FRAGMENT.canonical_id(), 0)
+    check("without duplex formation, fragment pool is fully converted by t_max", frag_left_off == 0)
+    check("with duplex formation on, fragment pool is also fully converted (same conversion capacity)", frag_left_on == 0)
+
+    active_off = result_off.counts.get(TEMPLATE.canonical_id(), 0)
+    active_on = result_on.counts.get(TEMPLATE.canonical_id(), 0)
+    duplex_off = result_off.counts.get(DUPLEX.canonical_id(), 0)
+    duplex_on = result_on.counts.get(DUPLEX.canonical_id(), 0)
+    equiv_off = active_off + 2 * duplex_off
+    equiv_on = active_on + 2 * duplex_on
+    print(f"  -> duplex off: active_template={active_off} duplex={duplex_off} (template-equivalent={equiv_off})")
+    print(f"  -> duplex on:  active_template={active_on} duplex={duplex_on} (template-equivalent={equiv_on})")
+
+    check("without duplex formation, essentially all converted material is catalytically active free template",
+          active_off > 400)
+    check("with duplex formation on, the catalytically active free template pool is largely sequestered away",
+          active_on < active_off * 0.2)
+    check("total template-equivalent material converted is the same either way -- "
+          "duplex formation locks up product, it doesn't reduce total conversion",
+          abs(equiv_on - equiv_off) <= 5)
+
+
 if __name__ == "__main__":
     test_molecule_formulas()
     test_radicalization_and_combination()
@@ -741,4 +903,9 @@ if __name__ == "__main__":
     test_formose_ribose_selectivity_is_a_real_correction_factor()
     test_nucleotide_reaction_structure()
     test_nucleotide_forms_and_photoselection_protects_scarce_cyanoacetylene()
+    test_reaction_propensity_generalizes_to_n_body()
+    test_polymer_reaction_structure()
+    test_polymer_mass_conservation()
+    test_polymer_templating_accelerates_strand_formation()
+    test_polymer_duplex_formation_causes_self_inhibition()
     print("\nAll sanity checks passed.")

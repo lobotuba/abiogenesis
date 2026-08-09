@@ -77,7 +77,9 @@ photochemistry.
 """
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
+from math import comb
 from typing import Literal
 
 from .molecule import (
@@ -135,16 +137,20 @@ class Reaction:
         return tuple(p.canonical_id() for p in self.products)
 
     def propensity(self, counts: dict[str, int]) -> float:
-        a, b = (self.reactant_ids + (None,))[:2]
-        na = counts.get(a, 0)
-        if len(self.reactant_ids) == 1:
-            return self.rate_constant * self.weight * na
-        nb = counts.get(b, 0)
-        if a == b:
-            pairs = na * (na - 1) / 2.0
-        else:
-            pairs = na * nb
-        return self.rate_constant * self.weight * pairs
+        # General Gillespie combinatorial term: for each distinct reactant
+        # id appearing with multiplicity m in this reaction, the number of
+        # ways to draw m molecules of it from the current pool is
+        # comb(n, m) (n choose m; 0 if n < m). Multiplying across distinct
+        # ids handles unimolecular, bimolecular (both same and different
+        # species -- the two cases this used to hand-special-case), and
+        # genuinely termolecular reactions (e.g. polymer.py's templated
+        # ligation, A + A + T -> T + T) with one formula. For every
+        # reactant_ids shape used before this generalization it reduces to
+        # exactly the old na / na*nb / na*(na-1)/2 arithmetic.
+        factor = 1.0
+        for rid, multiplicity in Counter(self.reactant_ids).items():
+            factor *= comb(counts.get(rid, 0), multiplicity)
+        return self.rate_constant * self.weight * factor
 
 
 def _mk_key(kind: str, reactants: tuple[str, ...], products: tuple[str, ...]) -> str:
