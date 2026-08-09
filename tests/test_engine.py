@@ -26,7 +26,7 @@ from engine.reactions import generate_reactions_for_species
 from engine.simulator import SimParams, Simulator
 from engine.autocatalysis import find_candidate_cycles
 from engine.analysis import chain_length_stats
-from engine.formose import FormoseParams, build_formose_reactions, run_formose
+from engine.formose import PENTOSE_DIASTEREOMERS, FormoseParams, build_formose_reactions, run_formose
 
 
 def check(label, cond):
@@ -581,6 +581,65 @@ def test_formose_ribose_needs_stabilization():
           stab_on > c5_off)
 
 
+def test_formose_stereoisomer_tracking_structure():
+    params = FormoseParams(max_sugar_carbon=7, k_stabilize=1.0, stabilize_carbon=5,
+                            track_pentose_stereoisomers=True, ribose_selectivity=3.0)
+    reactions = build_formose_reactions(params)
+
+    aldol_into_c5 = [r for r in reactions if r.kind == "aldol" and r.reactant_ids == ("C4sugar", "HCHO")]
+    check("C4 -> C5 aldol growth splits into all 4 pentose diastereomers", len(aldol_into_c5) == 4)
+    check("each variant produced by aldol growth into C5 is a real named diastereomer",
+          {p.canonical_id() for r in aldol_into_c5 for p in r.products}
+          == {f"C5sugar-{v}" for v in PENTOSE_DIASTEREOMERS})
+
+    stab = [r for r in reactions if r.kind == "stabilization"]
+    check("stabilization reaction exists for each of the 4 diastereomers", len(stab) == 4)
+    ribose_stab = next(r for r in stab if "ribose" in r.reactant_ids[0])
+    other_stab = [r for r in stab if "ribose" not in r.reactant_ids[0]]
+    check("ribose's stabilization rate is boosted by ribose_selectivity", ribose_stab.rate_constant == 3.0)
+    check("the other 3 diastereomers keep the base stabilization rate", all(r.rate_constant == 1.0 for r in other_stab))
+
+    # without stereoisomer tracking, the network should be identical to the plain generic model
+    params_generic = FormoseParams(max_sugar_carbon=7, k_stabilize=1.0, stabilize_carbon=5,
+                                    track_pentose_stereoisomers=False)
+    reactions_generic = build_formose_reactions(params_generic)
+    check("stereoisomer tracking off falls back to a single generic C5 stabilization reaction",
+          len([r for r in reactions_generic if r.kind == "stabilization"]) == 1)
+
+
+def test_formose_ribose_selectivity_is_a_real_correction_factor():
+    """Answers the actual question this feature exists for: is there a
+    variable that lets ribose be preferentially captured, rather than
+    treating the whole C5 pool as generic? Real chemistry: aldol addition
+    itself is unselective (no chiral catalyst), but borate's binding
+    affinity is NOT uniform across pentose stereoisomers -- that's what
+    ribose_selectivity represents, applied only to the stabilization step."""
+
+    def stabilized_fractions(selectivity):
+        params = FormoseParams(
+            k_init=0.05, k_aldol=1.0, k_retro_aldol=0.3, k_cannizzaro=0.05,
+            k_stabilize=0.5, stabilize_carbon=5, max_sugar_carbon=8,
+            track_pentose_stereoisomers=True, ribose_selectivity=selectivity,
+            t_max=300.0, max_events=300_000, sample_every=1000, seed=7,
+        )
+        result = run_formose(params, initial_hcho=1000)
+        counts = {v: result.counts.get(f"C5sugar-stabilized-{v}", 0) for v in PENTOSE_DIASTEREOMERS}
+        total = sum(counts.values())
+        return counts, (counts["ribose"] / total if total else 0.0)
+
+    counts_unselective, frac_unselective = stabilized_fractions(1.0)
+    counts_selective, frac_selective = stabilized_fractions(5.0)
+    print(f"  -> selectivity=1.0: {counts_unselective} (ribose fraction {frac_unselective:.1%})")
+    print(f"  -> selectivity=5.0: {counts_selective} (ribose fraction {frac_selective:.1%})")
+
+    check("with no selectivity, ribose's share of the stabilized pool is roughly the naive 1/4 baseline",
+          0.10 < frac_unselective < 0.45)
+    check("boosting ribose_selectivity meaningfully raises ribose's share of the stabilized pool",
+          frac_selective > frac_unselective)
+    check("boosted selectivity produces more absolute ribose than the unselective case",
+          counts_selective["ribose"] > counts_unselective["ribose"])
+
+
 if __name__ == "__main__":
     test_molecule_formulas()
     test_radicalization_and_combination()
@@ -603,4 +662,6 @@ if __name__ == "__main__":
     test_formose_reaction_structure()
     test_formose_carbon_conservation_and_chain_growth()
     test_formose_ribose_needs_stabilization()
+    test_formose_stereoisomer_tracking_structure()
+    test_formose_ribose_selectivity_is_a_real_correction_factor()
     print("\nAll sanity checks passed.")

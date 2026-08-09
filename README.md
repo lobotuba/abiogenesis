@@ -267,19 +267,51 @@ hypothesis holds up in this simplified model: **ribose-sized sugar needs a
 rescue mechanism to accumulate; the aldol chemistry alone won't durably
 produce it.**
 
-**The honest limitation**: this model has no stereochemistry. Sugars are
-tracked only by carbon count, so "C5 sugar" means the *entire pentose
-pool* -- ribose, its three aldopentose stereoisomers (arabinose, xylose,
-lyxose), and the ketopentoses -- not ribose specifically. `RIBOSE_FRACTION_ESTIMATE`
-(1/4, in `engine/formose.py`) is a documented, literature-style heuristic
-for converting a simulated C5-pool size into a ballpark ribose-equivalent
-number -- it's carried in from outside, not something the simulation
-itself derives. The app's Formose section surfaces this explicitly rather
-than implying more precision than the model has. Also not modeled:
-crossed aldol reactions between two sugars (only sugar + formaldehyde
-growth is included, a scope cut that avoids an M×N combinatorial
-explosion of product sizes while still capturing the essential growth
-mechanism), and any borate-independent stabilization pathway.
+### Is ribose's stereoisomer problem fixable, or just estimated away?
+
+The model's biggest limitation was that "C5 sugar" meant the whole pentose
+pool -- ribose, arabinose, xylose, and lyxose all lumped together, with a
+flat `RIBOSE_FRACTION_ESTIMATE` (1/4) applied after the fact to guess how
+much of that pool was "really" ribose. That's not fully honest: real aldol
+addition genuinely has no stereoselectivity without a chiral catalyst (so
+treating the four diastereomers as equally likely going *into* the pool is
+correct), but real borate-binding affinity is *not* uniform across them --
+ribose's furanose ring binds somewhat preferentially. So there is a real
+variable hiding behind that flat estimate, and it belongs on the
+*stabilization* step specifically, not smeared across the whole pool.
+
+`track_pentose_stereoisomers` (off by default) turns this on: the C5 tier
+splits into the four real named diastereomers (`PENTOSE_DIASTEREOMERS` in
+`engine/formose.py`), aldol addition produces each with equal weight (the
+honest, unselective part), and `ribose_selectivity` multiplies *only*
+ribose's stabilization rate relative to the other three. Tested directly
+(`test_formose_ribose_selectivity_is_a_real_correction_factor`): with
+`ribose_selectivity=1.0`, ribose holds ~33% of the stabilized pool (close
+to the 1-in-4 baseline, within stochastic noise -- confirming the
+unselective-aldol assumption is behaving as intended); with
+`ribose_selectivity=5.0`, that jumps to ~57%, with ribose's absolute count
+more than doubling while the other three stereoisomers stay flat. The
+ribose fraction is now something the simulation actually produces from an
+adjustable, chemically-motivated variable, not a number typed in after the
+fact.
+
+**A different, more radical real answer worth knowing about (not built
+here):** Sutherland et al.'s 2009 *Nature* paper ("Synthesis of activated
+pyrimidine ribonucleotides in prebiotically plausible conditions") sidesteps
+the sugar problem entirely rather than solving it -- ribose and the
+nucleobase are synthesized *together* from glycolaldehyde and cyanamide,
+with unwanted diastereomers destroyed by UV along the way, so free ribose
+never needs to exist and be purified on its own. That's a fundamentally
+different pathway, not a parameter tweak, and a natural candidate for a
+future module if this project pushes further toward nucleotides.
+
+**Still not modeled**: full 3D stereochemistry beyond the one tracked
+tier (real formose stereochemistry starts mattering from C3 onward, not
+just C5), crossed aldol reactions between two sugars (only sugar +
+formaldehyde growth is included, a scope cut that avoids an M×N
+combinatorial explosion of product sizes while still capturing the
+essential growth mechanism), and any borate-independent stabilization
+pathway.
 
 **Simulation** uses the Gillespie stochastic simulation algorithm (SSA) over
 a reaction network that grows on demand: the first time a new molecule
@@ -445,10 +477,14 @@ chemistry back down about as fast as photochemistry can make it.
   likely depended on for concentrating and protecting reactive intermediates.
   Also no altitude-dependent UV/pressure profile, so this can't reproduce
   something like a real stratospheric ozone layer.
-- **No stereochemistry, anywhere -- most consequential in the formose
-  module.** "C5 sugar" is the whole pentose pool, not ribose; the
-  `RIBOSE_FRACTION_ESTIMATE` heuristic is carried in from the literature,
-  not derived. No crossed sugar-sugar aldol reactions (only sugar +
+- **Stereochemistry is only tracked at one tier, opt-in.** With
+  `track_pentose_stereoisomers` on, the formose module distinguishes
+  ribose from its 3 stereoisomers at C5 specifically (see the Formose
+  section above) -- but that's the only place in the whole project with
+  any stereochemistry at all, and it stops at naming 4 diastereomers with
+  adjustable rates, not real 3D geometry. Off by default, "C5 sugar" is
+  still the whole pentose pool and `RIBOSE_FRACTION_ESTIMATE` is a carried-
+  in heuristic. No crossed sugar-sugar aldol reactions (only sugar +
   formaldehyde growth), and mineral stabilization is a single one-way
   reaction, not a real borate-binding equilibrium.
 
@@ -467,15 +503,18 @@ Roughly in order of how directly each one advances the actual question:
    of hand-written wrapper classes -- unlocking a much richer, more
    Miller-Urey-like reaction space and real catalytic possibilities (e.g. a
    species that lowers another reaction's activation energy).
-2. **Stereochemistry for the formose module.** The single biggest
-   limitation on the ribose question specifically: distinguishing ribose
-   from arabinose/xylose/lyxose (and the ketopentoses) needs actual
-   3D/chirality tracking, not just a carbon-count label. This is what
-   would let `RIBOSE_FRACTION_ESTIMATE` stop being an imported heuristic
-   and become an emergent result of the model itself -- arguably the most
-   direct way to sharpen this project's answer to "does life's chemistry
-   have a plausible abiotic source," since ribose is a harder, more
-   specific target than any hydrocarbon.
+2. **Deeper stereochemistry for the formose module.** Named-diastereomer
+   tracking with a selective stabilization rate now exists at the C5 tier
+   (`track_pentose_stereoisomers`), which was the most direct fix for the
+   ribose question specifically -- but it's still a label with an
+   adjustable rate, not real 3D/chirality geometry, and it only applies at
+   one carbon number. Real geometry (so the model could in principle
+   *derive* rather than assume which sugars borate should prefer) and
+   tracking through more of the carbon ladder (real stereochemistry starts
+   at C3) are the natural next steps. The bigger structural alternative is
+   the Sutherland systems-chemistry pathway noted in the Formose section
+   above -- sidestepping free-ribose synthesis entirely rather than trying
+   to purify it out of a mixture.
 3. **Nitrile / HCN chemistry.** The real Miller-Urey route to amino acid
    precursors goes through HCN and related nitriles, not just amines --
    this model's nitrogen chemistry stops one step short of that.

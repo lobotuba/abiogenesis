@@ -13,7 +13,7 @@ import streamlit as st
 
 from engine.analysis import chain_length_stats
 from engine.autocatalysis import build_flow_graph, find_candidate_cycles
-from engine.formose import RIBOSE_FRACTION_ESTIMATE, FormoseParams, run_formose
+from engine.formose import PENTOSE_DIASTEREOMERS, RIBOSE_FRACTION_ESTIMATE, FormoseParams, run_formose
 from engine.molecule import ATMOSPHERIC_GASES, Molecule, SEED_MOLECULES, ethane, methane
 from engine.simulator import SimParams, Simulator
 
@@ -553,12 +553,43 @@ with fc2:
     formose_t_max = st.slider("Formose: simulated time", 10.0, 2000.0, 300.0, step=10.0)
     formose_seed = st.number_input("Formose: random seed", value=7, step=1)
 
+st.subheader("Is there a correction factor for ribose specifically?")
+st.caption(
+    "By default this model can't distinguish ribose from its 3 stereoisomers (arabinose, "
+    "xylose, lyxose) -- 'C5 sugar' is the whole pentose pool. But real chemistry isn't fully "
+    "uninformative here: aldol addition itself has no stereoselectivity (nothing to tune "
+    "there), but borate's binding affinity is NOT uniform across pentose diastereomers -- "
+    "ribose's furanose ring binds somewhat preferentially (Ricardo et al., Science 2004). "
+    "Turning this on splits the target tier into the 4 real named diastereomers and lets "
+    "ribose's stabilization rate be boosted relative to the other 3, so the ribose fraction "
+    "becomes something the simulation actually produces instead of an imported guess."
+)
+track_stereo = st.checkbox(
+    "Track pentose stereoisomers (ribose, arabinose, xylose, lyxose)", value=False,
+    help="Only takes effect when 'Which sugar size gets mineral protection' is 5.",
+)
+ribose_selectivity = 1.0
+if track_stereo:
+    if stabilize_carbon != 5:
+        st.warning(
+            "Stereoisomer tracking only applies at carbon number 5 (ribose's carbon count) -- "
+            "set 'Which sugar size gets mineral protection' to 5 above to use it."
+        )
+    ribose_selectivity = st.slider(
+        "Ribose selectivity (borate binding preference vs. its 3 stereoisomers)",
+        1.0, 20.0, 1.0, step=0.5,
+        help="1.0 = no preference, matching real unselective aldol chemistry -- expect ribose "
+             "to land around 1-in-4 of the stabilized pool. Raise it to see how much borate-"
+             "binding selectivity it would take for ribose to dominate.",
+    )
+
 run_formose_clicked = st.button("Run formose simulation", use_container_width=True)
 
 if run_formose_clicked:
     formose_params = FormoseParams(
         k_init=k_init, k_aldol=k_aldol, k_retro_aldol=k_retro_aldol, k_cannizzaro=k_cannizzaro,
         k_stabilize=k_stabilize, stabilize_carbon=stabilize_carbon, max_sugar_carbon=max_sugar_carbon,
+        track_pentose_stereoisomers=track_stereo, ribose_selectivity=ribose_selectivity,
         t_max=formose_t_max, max_events=300_000, sample_every=1000, seed=int(formose_seed),
     )
     with st.spinner("Running formose simulation..."):
@@ -566,47 +597,87 @@ if run_formose_clicked:
     st.session_state["formose_result"] = formose_result
     st.session_state["formose_params"] = formose_params
     st.session_state["formose_stabilize_carbon"] = stabilize_carbon
+    st.session_state["formose_track_stereo"] = track_stereo and stabilize_carbon == 5
 
 if "formose_result" in st.session_state:
     fresult = st.session_state["formose_result"]
     fparams = st.session_state["formose_params"]
     fstab_carbon = st.session_state["formose_stabilize_carbon"]
+    ftrack = st.session_state["formose_track_stereo"]
 
     hcho_now = fresult.counts.get("HCHO", 0)
-    target_sid = f"C{fstab_carbon}sugar"
-    stabilized_sid = f"C{fstab_carbon}sugar-stabilized"
-    free_target = fresult.counts.get(target_sid, 0)
-    stabilized_target = fresult.counts.get(stabilized_sid, 0)
-    ribose_equivalent = round((free_target + stabilized_target) * RIBOSE_FRACTION_ESTIMATE, 1)
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("HCHO remaining", hcho_now)
-    m2.metric(f"Free C{fstab_carbon} sugar", free_target)
-    m3.metric(f"Stabilized C{fstab_carbon} sugar", stabilized_target)
-    m4.metric(
-        "Ribose-equivalent estimate", ribose_equivalent,
-        help=f"({free_target} + {stabilized_target}) x {RIBOSE_FRACTION_ESTIMATE:.0%} -- a "
-             "literature-style heuristic, not something the simulation itself resolves (no "
-             "stereochemistry is tracked here).",
-    )
+    if ftrack:
+        stab_counts = {v: fresult.counts.get(f"C{fstab_carbon}sugar-stabilized-{v}", 0) for v in PENTOSE_DIASTEREOMERS}
+        free_counts = {v: fresult.counts.get(f"C{fstab_carbon}sugar-{v}", 0) for v in PENTOSE_DIASTEREOMERS}
+        total_stab = sum(stab_counts.values())
+        ribose_share = stab_counts["ribose"] / total_stab if total_stab else 0.0
 
-    if fparams.k_stabilize == 0.0:
-        st.info(
-            f"**No mineral rescue**: {free_target} free C{fstab_carbon} sugar exists right now, but "
-            "nothing protects it -- it stays in the same aldol/retro-aldol equilibrium as every other "
-            "sugar size, so it doesn't durably accumulate. Turn on the stabilization rate to test "
-            "whether that's what changes the picture."
-        )
-    elif stabilized_target > 0:
-        st.success(
-            f"**Mineral stabilization works**: {stabilized_target} C{fstab_carbon} sugar molecules have "
-            f"been pulled out of the reactive pool and protected, versus only {free_target} unprotected "
-            "free sugar sitting in the same equilibrium as everything else. This is the Ricardo et al. "
-            "hypothesis in miniature: a rescue mechanism, not the aldol chemistry alone, is what lets a "
-            "persistent ribose-sized pool build up."
-        )
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("HCHO remaining", hcho_now)
+        m2.metric("Stabilized ribose (actual count)", stab_counts["ribose"])
+        m3.metric("Stabilized, whole pentose pool", total_stab)
+        m4.metric("Ribose's share of stabilized pool", f"{ribose_share:.0%}")
+
+        fig_stereo = go.Figure()
+        fig_stereo.add_trace(go.Bar(name="Free (unprotected)", x=list(PENTOSE_DIASTEREOMERS),
+                                     y=[free_counts[v] for v in PENTOSE_DIASTEREOMERS]))
+        fig_stereo.add_trace(go.Bar(name="Stabilized (protected)", x=list(PENTOSE_DIASTEREOMERS),
+                                     y=[stab_counts[v] for v in PENTOSE_DIASTEREOMERS]))
+        fig_stereo.update_layout(barmode="group", yaxis_title="molecule count",
+                                  xaxis_title="pentose diastereomer", height=400)
+        st.plotly_chart(fig_stereo, use_container_width=True)
+
+        if fparams.ribose_selectivity <= 1.0:
+            st.info(
+                f"**No selectivity applied**: ribose holds {ribose_share:.0%} of the stabilized pool, "
+                "close to the 1-in-4 statistical baseline -- consistent with aldol addition having no "
+                "stereochemical bias on its own. Raise ribose_selectivity to test whether differential "
+                "borate binding is enough to change that."
+            )
+        else:
+            st.success(
+                f"**Selective stabilization works**: with ribose_selectivity={fparams.ribose_selectivity:g}, "
+                f"ribose holds {ribose_share:.0%} of the stabilized pool ({stab_counts['ribose']} molecules) "
+                f"versus {total_stab - stab_counts['ribose']} split across its 3 stereoisomers. This is a real, "
+                "adjustable variable -- differential borate-binding affinity -- not a flat guess applied "
+                "after the fact."
+            )
     else:
-        st.warning("Stabilization is on but nothing has been protected yet -- try a higher rate or longer run.")
+        target_sid = f"C{fstab_carbon}sugar"
+        stabilized_sid = f"C{fstab_carbon}sugar-stabilized"
+        free_target = fresult.counts.get(target_sid, 0)
+        stabilized_target = fresult.counts.get(stabilized_sid, 0)
+        ribose_equivalent = round((free_target + stabilized_target) * RIBOSE_FRACTION_ESTIMATE, 1)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("HCHO remaining", hcho_now)
+        m2.metric(f"Free C{fstab_carbon} sugar", free_target)
+        m3.metric(f"Stabilized C{fstab_carbon} sugar", stabilized_target)
+        m4.metric(
+            "Ribose-equivalent estimate", ribose_equivalent,
+            help=f"({free_target} + {stabilized_target}) x {RIBOSE_FRACTION_ESTIMATE:.0%} -- a "
+                 "literature-style heuristic, not something the simulation itself resolves. Turn on "
+                 "stereoisomer tracking above to get an actual simulated ribose count instead.",
+        )
+
+        if fparams.k_stabilize == 0.0:
+            st.info(
+                f"**No mineral rescue**: {free_target} free C{fstab_carbon} sugar exists right now, but "
+                "nothing protects it -- it stays in the same aldol/retro-aldol equilibrium as every other "
+                "sugar size, so it doesn't durably accumulate. Turn on the stabilization rate to test "
+                "whether that's what changes the picture."
+            )
+        elif stabilized_target > 0:
+            st.success(
+                f"**Mineral stabilization works**: {stabilized_target} C{fstab_carbon} sugar molecules have "
+                f"been pulled out of the reactive pool and protected, versus only {free_target} unprotected "
+                "free sugar sitting in the same equilibrium as everything else. This is the Ricardo et al. "
+                "hypothesis in miniature: a rescue mechanism, not the aldol chemistry alone, is what lets a "
+                "persistent ribose-sized pool build up."
+            )
+        else:
+            st.warning("Stabilization is on but nothing has been protected yet -- try a higher rate or longer run.")
 
     ftab_pop, ftab_dist = st.tabs(["Sugar population over time", "Sugar-size distribution"])
 
@@ -631,14 +702,31 @@ if "formose_result" in st.session_state:
         st.plotly_chart(fig, use_container_width=True)
 
     with ftab_dist:
-        sugar_counts = {f"C{n}": fresult.counts.get(f"C{n}sugar", 0) for n in range(2, fparams.max_sugar_carbon + 1)}
+        def _sugar_count_at(n):
+            if ftrack and n == fstab_carbon:
+                return sum(fresult.counts.get(f"C{n}sugar-{v}", 0) for v in PENTOSE_DIASTEREOMERS)
+            return fresult.counts.get(f"C{n}sugar", 0)
+
+        sugar_counts = {f"C{n}": _sugar_count_at(n) for n in range(2, fparams.max_sugar_carbon + 1)}
         if fparams.k_stabilize > 0:
-            sugar_counts[f"C{fstab_carbon} (stabilized)"] = stabilized_target
+            if ftrack:
+                sugar_counts[f"C{fstab_carbon} (stabilized)"] = sum(
+                    fresult.counts.get(f"C{fstab_carbon}sugar-stabilized-{v}", 0) for v in PENTOSE_DIASTEREOMERS
+                )
+            else:
+                sugar_counts[f"C{fstab_carbon} (stabilized)"] = stabilized_target
         fig2 = go.Figure(go.Bar(x=list(sugar_counts.keys()), y=list(sugar_counts.values())))
         fig2.update_layout(yaxis_title="molecule count", xaxis_title="sugar size", height=400)
         st.plotly_chart(fig2, use_container_width=True)
-        st.caption(
-            "Every sugar size is a generic (CH2O)n -- this doesn't distinguish ribose from its "
-            "stereoisomers (arabinose, xylose, lyxose) or from ketopentoses. 'C5 sugar' is the whole "
-            "pentose pool, not ribose specifically."
-        )
+        if ftrack:
+            st.caption(
+                f"C{fstab_carbon} bars here sum across all 4 tracked diastereomers -- see the stereoisomer "
+                "chart above for the ribose-specific breakdown. Every other sugar size is still a generic "
+                "(CH2O)n pool."
+            )
+        else:
+            st.caption(
+                "Every sugar size is a generic (CH2O)n -- this doesn't distinguish ribose from its "
+                "stereoisomers (arabinose, xylose, lyxose) or from ketopentoses. 'C5 sugar' is the whole "
+                "pentose pool, not ribose specifically."
+            )

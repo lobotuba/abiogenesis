@@ -55,8 +55,21 @@ four D/L aldopentose diastereomer pairs formose chemistry produces roughly
 statistically without a selective catalyst (ribose, arabinose, xylose,
 lyxose -- ignoring ketopentoses for this rough estimate), ribose is one.
 Multiply a simulated "C5 sugar" count by this to get a ballpark
-ribose-equivalent number. This model has no stereochemistry and cannot
-derive this fraction itself -- it's carried in from outside."""
+ribose-equivalent number. Used when `track_pentose_stereoisomers` is off
+(the default). When it's on, the simulation reports actual ribose counts
+instead of needing this -- see FormoseParams.ribose_selectivity below,
+which is the real, tunable variable this estimate was standing in for."""
+
+PENTOSE_DIASTEREOMERS = ("ribose", "arabinose", "xylose", "lyxose")
+"""The four aldopentose diastereomer classes (D/L collapsed -- borate, an
+achiral ion, doesn't distinguish enantiomers, only the relative
+"cis/trans" diol geometry that differs between these four). Real formose
+aldol addition, with no chiral catalyst present, is understood to produce
+these roughly statistically -- the four get equal formation weight in
+`build_formose_reactions` when stereoisomer tracking is on. What's NOT
+equal in reality is how well borate binds each one afterward (ribose's
+furanose form has a favorable cis-diol for borate binding relative to its
+stereoisomers) -- that's what `ribose_selectivity` represents."""
 
 
 class _Formaldehyde:
@@ -133,20 +146,23 @@ CANNIZZARO_WASTE = _CannizzaroWaste()
 
 
 class Sugar:
-    """A generic (CH2O)_n sugar, tracked only by carbon count -- no
-    distinction between aldose/ketose or between stereoisomers. Reactive:
-    can still grow (aldol), shrink (retro-aldol), until stabilized."""
+    """A (CH2O)_n sugar, tracked by carbon count and, optionally, a named
+    stereoisomer variant (only meaningful at the tracked target carbon
+    number -- see PENTOSE_DIASTEREOMERS). Reactive: can still grow
+    (aldol), shrink (retro-aldol), until stabilized."""
 
-    __slots__ = ("n",)
+    __slots__ = ("n", "variant")
 
-    def __init__(self, n: int):
+    def __init__(self, n: int, variant: str | None = None):
         self.n = n
+        self.variant = variant
 
     def canonical_id(self) -> str:
-        return f"C{self.n}sugar"
+        return f"C{self.n}sugar" + (f"-{self.variant}" if self.variant else "")
 
     def formula(self) -> str:
-        return f"(CH2O){self.n}"
+        base = f"(CH2O){self.n}"
+        return f"{base} [{self.variant}]" if self.variant else base
 
     @property
     def n_carbon(self) -> int:
@@ -160,10 +176,10 @@ class Sugar:
         return []
 
     def __eq__(self, other):
-        return isinstance(other, Sugar) and other.n == self.n
+        return isinstance(other, Sugar) and other.n == self.n and other.variant == self.variant
 
     def __hash__(self):
-        return hash(("sugar", self.n))
+        return hash(("sugar", self.n, self.variant))
 
     def __repr__(self):
         return f"Molecule({self.formula()})"
@@ -174,16 +190,18 @@ class StabilizedSugar:
     binding -- terminal, no further reactions, same treatment already
     used elsewhere in this project for e.g. H2O or NH3."""
 
-    __slots__ = ("n",)
+    __slots__ = ("n", "variant")
 
-    def __init__(self, n: int):
+    def __init__(self, n: int, variant: str | None = None):
         self.n = n
+        self.variant = variant
 
     def canonical_id(self) -> str:
-        return f"C{self.n}sugar-stabilized"
+        return f"C{self.n}sugar-stabilized" + (f"-{self.variant}" if self.variant else "")
 
     def formula(self) -> str:
-        return f"(CH2O){self.n}·borate"
+        base = f"(CH2O){self.n}·borate"
+        return f"{base} [{self.variant}]" if self.variant else base
 
     @property
     def n_carbon(self) -> int:
@@ -197,10 +215,10 @@ class StabilizedSugar:
         return []
 
     def __eq__(self, other):
-        return isinstance(other, StabilizedSugar) and other.n == self.n
+        return isinstance(other, StabilizedSugar) and other.n == self.n and other.variant == self.variant
 
     def __hash__(self):
-        return hash(("stabilized", self.n))
+        return hash(("stabilized", self.n, self.variant))
 
     def __repr__(self):
         return f"Molecule({self.formula()})"
@@ -218,16 +236,47 @@ class FormoseParams:
                                  # i.e. the "no mineral rescue" case
     stabilize_carbon: int = 5   # which sugar size gets mineral protection (5 = ribose's carbon count)
     max_sugar_carbon: int = 8   # complexity ceiling, same role as max_carbon in the hydrocarbon engine
+    track_pentose_stereoisomers: bool = False  # split the C5 tier into the 4 real named
+                                 # diastereomers (only takes effect when stabilize_carbon == 5).
+                                 # OFF by default -- preserves the simple generic-pool model.
+    ribose_selectivity: float = 1.0  # multiplies k_stabilize for ribose specifically, relative to
+                                 # its 3 stereoisomers (arabinose/xylose/lyxose), which all keep the
+                                 # base k_stabilize. 1.0 = no selectivity (matches real borate binding
+                                 # ribose somewhat preferentially -- Ricardo et al. 2004 -- so values
+                                 # above 1 are the realistic direction to explore). Only matters when
+                                 # track_pentose_stereoisomers is on; this is the actual tunable
+                                 # variable behind RIBOSE_FRACTION_ESTIMATE.
     t_max: float = 500.0
     max_events: int = 200_000
     sample_every: int = 25
     seed: int | None = None
 
 
+def _sugar_variants(n: int, track: bool) -> list[str | None]:
+    """Which named variants exist at carbon number n. Only the tracked
+    target tier (n == 5, when stereoisomer tracking is on) has more than
+    one; every other tier is the single generic, untagged sugar."""
+    if track and n == 5:
+        return list(PENTOSE_DIASTEREOMERS)
+    return [None]
+
+
 def build_formose_reactions(p: FormoseParams) -> list[Reaction]:
     """The formose network is fully known upfront (unlike the hydrocarbon
     engine's combinatorial isomer explosion) -- no on-demand discovery
-    needed, just build the whole fixed reaction list once."""
+    needed, just build the whole fixed reaction list once.
+
+    When track_pentose_stereoisomers is on, the carbon-5 tier is split
+    into the 4 real named diastereomers (see PENTOSE_DIASTEREOMERS).
+    Aldol addition treats them as equally likely (real formose aldol
+    chemistry has no stereoselectivity without a chiral catalyst) --
+    whichever reaction touches the C5 tier from a generic neighbor
+    (C4 or C6) becomes 4 parallel, equally-weighted reactions, one per
+    variant, so each gets ~1/4 of that flux automatically through
+    ordinary Gillespie competition. Stabilization is the one place real
+    selectivity enters: ribose's rate is multiplied by
+    `ribose_selectivity` relative to its 3 stereoisomers."""
+    track = p.track_pentose_stereoisomers and p.stabilize_carbon == 5
     out: list[Reaction] = []
 
     out.append(Reaction(
@@ -240,24 +289,74 @@ def build_formose_reactions(p: FormoseParams) -> list[Reaction]:
     ))
 
     for n in range(2, p.max_sugar_carbon):
-        out.append(Reaction(
-            kind="aldol", reactant_ids=tuple(sorted((f"C{n}sugar", "HCHO"))),
-            products=(Sugar(n + 1),), rate_constant=p.k_aldol, weight=1.0,
-            key=f"aldol:C{n}sugar+HCHO->C{n + 1}sugar",
-        ))
-        out.append(Reaction(
-            kind="retro_aldol", reactant_ids=(f"C{n + 1}sugar",),
-            products=(Sugar(n), FORMALDEHYDE), rate_constant=p.k_retro_aldol, weight=1.0,
-            key=f"retro_aldol:C{n + 1}sugar->C{n}sugar+HCHO",
-        ))
+        variants_n = _sugar_variants(n, track)
+        variants_n1 = _sugar_variants(n + 1, track)
+
+        # aldol: Cn + HCHO -> C(n+1)
+        if len(variants_n1) > 1:
+            for v in variants_n1:
+                out.append(Reaction(
+                    kind="aldol", reactant_ids=tuple(sorted((f"C{n}sugar", "HCHO"))),
+                    products=(Sugar(n + 1, v),), rate_constant=p.k_aldol, weight=1.0,
+                    key=f"aldol:C{n}sugar+HCHO->C{n + 1}sugar-{v}",
+                ))
+        elif len(variants_n) > 1:
+            for v in variants_n:
+                rid = f"C{n}sugar-{v}"
+                out.append(Reaction(
+                    kind="aldol", reactant_ids=tuple(sorted((rid, "HCHO"))),
+                    products=(Sugar(n + 1),), rate_constant=p.k_aldol, weight=1.0,
+                    key=f"aldol:{rid}+HCHO->C{n + 1}sugar",
+                ))
+        else:
+            out.append(Reaction(
+                kind="aldol", reactant_ids=tuple(sorted((f"C{n}sugar", "HCHO"))),
+                products=(Sugar(n + 1),), rate_constant=p.k_aldol, weight=1.0,
+                key=f"aldol:C{n}sugar+HCHO->C{n + 1}sugar",
+            ))
+
+        # retro-aldol: C(n+1) -> Cn + HCHO
+        if len(variants_n1) > 1:
+            for v in variants_n1:
+                rid = f"C{n + 1}sugar-{v}"
+                out.append(Reaction(
+                    kind="retro_aldol", reactant_ids=(rid,),
+                    products=(Sugar(n), FORMALDEHYDE), rate_constant=p.k_retro_aldol, weight=1.0,
+                    key=f"retro_aldol:{rid}->C{n}sugar+HCHO",
+                ))
+        elif len(variants_n) > 1:
+            for v in variants_n:
+                out.append(Reaction(
+                    kind="retro_aldol", reactant_ids=(f"C{n + 1}sugar",),
+                    products=(Sugar(n, v), FORMALDEHYDE), rate_constant=p.k_retro_aldol, weight=1.0,
+                    key=f"retro_aldol:C{n + 1}sugar->C{n}sugar-{v}+HCHO",
+                ))
+        else:
+            out.append(Reaction(
+                kind="retro_aldol", reactant_ids=(f"C{n + 1}sugar",),
+                products=(Sugar(n), FORMALDEHYDE), rate_constant=p.k_retro_aldol, weight=1.0,
+                key=f"retro_aldol:C{n + 1}sugar->C{n}sugar+HCHO",
+            ))
 
     if p.k_stabilize > 0 and p.stabilize_carbon >= 2:
-        out.append(Reaction(
-            kind="stabilization", reactant_ids=(f"C{p.stabilize_carbon}sugar",),
-            products=(StabilizedSugar(p.stabilize_carbon),),
-            rate_constant=p.k_stabilize, weight=1.0,
-            key=f"stabilization:C{p.stabilize_carbon}sugar",
-        ))
+        variants = _sugar_variants(p.stabilize_carbon, track)
+        if len(variants) > 1:
+            for v in variants:
+                rate = p.k_stabilize * (p.ribose_selectivity if v == "ribose" else 1.0)
+                rid = f"C{p.stabilize_carbon}sugar-{v}"
+                out.append(Reaction(
+                    kind="stabilization", reactant_ids=(rid,),
+                    products=(StabilizedSugar(p.stabilize_carbon, v),),
+                    rate_constant=rate, weight=1.0,
+                    key=f"stabilization:{rid}",
+                ))
+        else:
+            out.append(Reaction(
+                kind="stabilization", reactant_ids=(f"C{p.stabilize_carbon}sugar",),
+                products=(StabilizedSugar(p.stabilize_carbon),),
+                rate_constant=p.k_stabilize, weight=1.0,
+                key=f"stabilization:C{p.stabilize_carbon}sugar",
+            ))
     return out
 
 
@@ -269,12 +368,23 @@ def run_formose(p: FormoseParams, initial_hcho: int) -> SimResult:
     always is. Returns the same SimResult shape so it plugs into the same
     plotting code as the rest of the app."""
     reactions = build_formose_reactions(p)
+    track = p.track_pentose_stereoisomers and p.stabilize_carbon == 5
 
     species: dict[str, Species] = {"HCHO": FORMALDEHYDE, "waste": CANNIZZARO_WASTE}
     for n in range(2, p.max_sugar_carbon + 1):
-        species[f"C{n}sugar"] = Sugar(n)
+        variants = _sugar_variants(n, track)
+        if len(variants) > 1:
+            for v in variants:
+                species[f"C{n}sugar-{v}"] = Sugar(n, v)
+        else:
+            species[f"C{n}sugar"] = Sugar(n)
     if p.k_stabilize > 0 and p.stabilize_carbon >= 2:
-        species[f"C{p.stabilize_carbon}sugar-stabilized"] = StabilizedSugar(p.stabilize_carbon)
+        variants = _sugar_variants(p.stabilize_carbon, track)
+        if len(variants) > 1:
+            for v in variants:
+                species[f"C{p.stabilize_carbon}sugar-stabilized-{v}"] = StabilizedSugar(p.stabilize_carbon, v)
+        else:
+            species[f"C{p.stabilize_carbon}sugar-stabilized"] = StabilizedSugar(p.stabilize_carbon)
 
     counts = {sid: 0 for sid in species}
     counts["HCHO"] = initial_hcho
