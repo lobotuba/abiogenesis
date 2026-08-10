@@ -25,7 +25,8 @@ from engine.nucleotide import (
     NucleotideParams,
     run_nucleotide,
 )
-from engine.polymer import DUPLEX, FRAGMENT, TEMPLATE, PolymerParams, run_polymer
+from engine.polymer import DUPLEX, FRAGMENT, TEMPLATE, Duplex, Oligomer, PolymerParams, run_polymer
+from engine.selection import SelectionParams, run_selection
 from engine.simulator import SimParams, Simulator
 
 st.set_page_config(page_title="Abiogenesis: hydrocarbon photochemistry", layout="wide")
@@ -1030,3 +1031,166 @@ if "poly_result" in st.session_state:
             "per fragment, 6 per template, 12 per duplex) -- none are created or destroyed, so this "
             "bar chart (converted to those units) always sums back to the starting ribonucleotide count."
         )
+
+# -- Selection: does a faster replicator actually win? -----------------------
+st.divider()
+st.header("Selection: does a faster replicator actually win?")
+st.caption(
+    "The question this whole project was built to ask, made literal: given two heritable replicator "
+    "sequences (\"A\" and \"B\", standing in for distinct sequences the same way formose's named "
+    "diastereomers stand in for distinct stereoisomers) competing for the same shared, finite "
+    "ribonucleotide supply, does the faster-copying one actually win -- and can that faster variant "
+    "even *arise* from copying error in the first place, rather than being seeded in from outside? "
+    "Variant B starts unseeded by default: with mutation off, it can never appear at all (try it). "
+    "Turn mutation on and it can only ever come from an imperfect copy of A -- the actual minimal "
+    "source of heritable variation this project's engine was missing until now."
+)
+
+sc1, sc2 = st.columns(2)
+with sc1:
+    selection_ribonucleotide = st.slider("Starting shared ribonucleotide supply", 2000, 40000, 20000, step=1000)
+    seed_template_a = st.slider("Seed TEMPLATE-A (established from the start)", 0, 20, 2, step=1)
+    seed_template_b = st.slider(
+        "Seed TEMPLATE-B (0 = must arise via mutation, if at all)", 0, 20, 0, step=1,
+        help="0 recreates the capstone experiment: can a never-seeded variant emerge and take over? "
+             "Nonzero instead tests direct competition between two variants that both already exist.",
+    )
+    k_oligomerize_sel = st.slider("3 ribonucleotide -> fragment, shared (k_oligomerize)", 0.0, 0.01, 0.0005, step=0.0001, format="%.4f")
+    k_background_sel = st.slider(
+        "Fragment + fragment -> template, uncatalyzed, shared (k_background)", 0.0, 0.01, 0.0, step=0.0005, format="%.4f",
+        help="Keep at 0 for the cleanest 'did mutation introduce this variant' comparison -- nonzero "
+             "means undirected background chemistry could also independently stumble into forming "
+             "TEMPLATE-B from scratch, with no mutation needed.",
+    )
+with sc2:
+    k_template_a = st.slider("A's templated-ligation rate -- A's fitness (k_template[A])", 0.0, 20.0, 1.0, step=0.5)
+    k_template_b = st.slider("B's templated-ligation rate -- B's fitness (k_template[B])", 0.0, 20.0, 10.0, step=0.5)
+    k_duplex_sel = st.slider("Template + template -> duplex, shared (k_duplex)", 0.0, 5.0, 0.0, step=0.1)
+    k_melt_sel = st.slider("Duplex -> 2 template, shared (k_melt)", 0.0, 2.0, 0.0, step=0.05)
+    k_mutation = st.slider(
+        "Copying-error rate: A's copying occasionally yields B instead (k_mutation)", 0.0, 0.2, 0.0, step=0.005,
+        help="Off (0) by default -- with seed_template_b also 0, this is the only way B can ever exist.",
+    )
+    selection_t_max = st.slider("Selection: simulated time", 5.0, 800.0, 400.0, step=5.0)
+    selection_seed = st.number_input("Selection: random seed", value=1, step=1)
+
+run_selection_clicked = st.button("Run selection simulation", use_container_width=True)
+
+if run_selection_clicked:
+    sel_params = SelectionParams(
+        variants=("A", "B"), k_oligomerize=k_oligomerize_sel, k_background=k_background_sel,
+        k_template={"A": k_template_a, "B": k_template_b}, k_duplex=k_duplex_sel, k_melt=k_melt_sel,
+        k_mutation=k_mutation, t_max=selection_t_max, max_events=600_000, sample_every=1000,
+        seed=int(selection_seed),
+    )
+    sel_init = {
+        RIBONUCLEOTIDE.canonical_id(): selection_ribonucleotide,
+        Oligomer(6, "A").canonical_id(): seed_template_a,
+        Oligomer(6, "B").canonical_id(): seed_template_b,
+    }
+    with st.spinner("Running selection simulation..."):
+        sel_result = run_selection(sel_params, sel_init)
+    st.session_state["sel_result"] = sel_result
+    st.session_state["sel_params"] = sel_params
+    st.session_state["sel_seed_b"] = seed_template_b
+
+if "sel_result" in st.session_state:
+    sresult = st.session_state["sel_result"]
+    sparams = st.session_state["sel_params"]
+    sseed_b = st.session_state["sel_seed_b"]
+
+    template_a = sresult.counts.get(Oligomer(6, "A").canonical_id(), 0)
+    template_b = sresult.counts.get(Oligomer(6, "B").canonical_id(), 0)
+    duplex_a = sresult.counts.get(Duplex("A").canonical_id(), 0)
+    duplex_b = sresult.counts.get(Duplex("B").canonical_id(), 0)
+    mutation_fires = sum(n for k, n in sresult.reaction_fire_counts.items() if k.startswith("mutation:"))
+
+    equiv_a = template_a + 2 * duplex_a
+    equiv_b = template_b + 2 * duplex_b
+
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Variant A (template-equivalent)", equiv_a)
+    s2.metric("Variant B (template-equivalent)", equiv_b)
+    s3.metric("Mutation events fired", mutation_fires)
+    s4.metric("Leading variant", "A" if equiv_a >= equiv_b else "B")
+
+    if sseed_b == 0 and sparams.k_mutation == 0:
+        st.info(
+            "**B was never seeded, and mutation is off** -- with no route to exist at all, B stays at "
+            f"exactly 0 (confirmed: {equiv_b}). This is the control: turn on the copying-error rate "
+            "(k_mutation) below to give B a way to actually come into existence."
+        )
+    elif sseed_b == 0 and sparams.k_mutation > 0 and equiv_b == 0:
+        st.warning(
+            "**Mutation is on, but B hasn't appeared yet** in this run -- a mutation event's rate "
+            "depends on how much of variant A already exists, so it can take a while to fire even "
+            "once. Try more simulated time or a higher k_mutation."
+        )
+    elif sseed_b == 0 and sparams.k_mutation > 0 and equiv_b > equiv_a:
+        st.success(
+            f"**Selection, from scratch**: variant B was never seeded -- it only exists ({equiv_b} "
+            f"template-equivalent units) because a copying error in A's own replication created it "
+            f"({mutation_fires} mutation events fired). Being fitter (higher k_template), it then "
+            f"overtook A ({equiv_a}), which had a head start from the very beginning of the run. This "
+            "is the literal minimal signature of Darwinian selection: heritable variation (mutation) "
+            "plus differential reproduction (fitness) under a shared constraint (the finite "
+            "ribonucleotide supply)."
+        )
+    elif sseed_b == 0 and sparams.k_mutation > 0:
+        st.info(
+            f"**B emerged via mutation ({mutation_fires} events) but hasn't caught up to A yet** "
+            f"({equiv_b} vs {equiv_a}) -- try more simulated time, a higher k_mutation (so B gets more "
+            "runway after it appears), or a bigger fitness gap."
+        )
+    elif equiv_a > 0 and equiv_b > equiv_a * 1.2:
+        st.success(
+            f"**Direct competition, B winning**: both variants started already seeded, competing for "
+            f"the same shared ribonucleotide supply -- B's higher templated-ligation rate is "
+            f"translating into a clear lead ({equiv_b} vs {equiv_a})."
+        )
+    elif equiv_b > 0 and equiv_a > equiv_b * 1.2:
+        st.success(
+            f"**Direct competition, A winning**: with these rates, A is out-competing B "
+            f"({equiv_a} vs {equiv_b}) for the shared food supply."
+        )
+    else:
+        st.info(f"**Direct competition, roughly even**: A={equiv_a}, B={equiv_b} -- try a bigger "
+                "k_template gap, or compare at an earlier simulated time before the shared "
+                "ribonucleotide supply runs out (given enough time, both fully consume their share "
+                "of it either way -- see the Polymerization section's own finding above).")
+
+    stab_pop, stab_bar = st.tabs(["Population over time", "A vs B (template-equivalent)"])
+
+    with stab_pop:
+        peak = {}
+        for snap in sresult.history_counts:
+            for sid, n in snap.items():
+                peak[sid] = max(peak.get(sid, 0), n)
+        top_ids = sorted(peak, key=peak.get, reverse=True)[:10]
+        rows = []
+        for t, snap in zip(sresult.history_t, sresult.history_counts):
+            for sid in top_ids:
+                rows.append({"t": t, "species": sresult.species[sid].formula(), "count": snap.get(sid, 0)})
+        sdf = pd.DataFrame(rows)
+        fig7 = go.Figure()
+        for formula, sub in sdf.groupby("species"):
+            fig7.add_trace(go.Scatter(x=sub["t"], y=sub["count"], mode="lines", name=formula))
+        fig7.update_layout(
+            yaxis_title="molecule count", xaxis_title="time (arbitrary units)",
+            yaxis_type="log", height=450, legend_title="species (top 10 by peak count)",
+        )
+        st.plotly_chart(fig7, use_container_width=True)
+
+    with stab_bar:
+        fig8 = go.Figure(go.Bar(
+            x=["Variant A", "Variant B"], y=[equiv_a, equiv_b],
+            marker_color=["#636EFA", "#EF553B"],
+        ))
+        fig8.update_layout(yaxis_title="template-equivalent units (active + 2 x duplex)", height=420)
+        st.plotly_chart(fig8, use_container_width=True)
+        st.caption(
+            "Both variants draw on the same shared, finite ribonucleotide supply through an equally-"
+            "rated oligomerization step -- the only place either variant is allowed an edge is its own "
+            "k_template. This bar chart is the most direct answer to 'which one actually won.'"
+        )
+

@@ -78,18 +78,26 @@ class Oligomer:
     units) -- same no-explicit-sequence abstraction nucleotide.py uses.
     This module's reaction network only ever produces two lengths: FRAGMENT
     (3, a "half-strand") and TEMPLATE (6, self-complementary -- its own two
-    halves are each a copy of FRAGMENT), which is the whole mechanism."""
+    halves are each a copy of FRAGMENT), which is the whole mechanism.
 
-    __slots__ = ("n",)
+    `variant`, like `Sugar`'s in formose.py, is optional and unused by this
+    module itself -- engine/selection.py sets it to name a distinct
+    heritable replicator sequence (e.g. "A"/"B") when modeling competing
+    populations. None (the default) preserves this module's original
+    single-species ids exactly."""
 
-    def __init__(self, n: int):
+    __slots__ = ("n", "variant")
+
+    def __init__(self, n: int, variant: str | None = None):
         self.n = n
+        self.variant = variant
 
     def canonical_id(self) -> str:
-        return f"oligo{self.n}"
+        return f"oligo{self.n}" + (f"-{self.variant}" if self.variant else "")
 
     def formula(self) -> str:
-        return f"(Nmp){self.n}"
+        base = f"(Nmp){self.n}"
+        return f"{base} [{self.variant}]" if self.variant else base
 
     @property
     def n_carbon(self) -> int:
@@ -103,29 +111,36 @@ class Oligomer:
         return []
 
     def __eq__(self, other):
-        return isinstance(other, Oligomer) and other.n == self.n
+        return isinstance(other, Oligomer) and other.n == self.n and other.variant == self.variant
 
     def __hash__(self):
-        return hash(("oligomer", self.n))
+        return hash(("oligomer", self.n, self.variant))
 
     def __repr__(self):
         return f"Molecule({self.formula()})"
 
 
 class Duplex:
-    """Two TEMPLATE strands hybridized into an inert double helix --
-    unreactive (no further reactions defined against it) until it melts
-    back apart. The product-inhibition step: the same self-complementarity
-    that lets one TEMPLATE catalyze ligation of two FRAGMENTs also lets two
-    TEMPLATEs pair with EACH OTHER, taking both out of circulation."""
+    """Two same-variant TEMPLATE strands hybridized into an inert double
+    helix -- unreactive (no further reactions defined against it) until it
+    melts back apart. The product-inhibition step: the same
+    self-complementarity that lets one TEMPLATE catalyze ligation of two
+    FRAGMENTs also lets two TEMPLATEs pair with EACH OTHER, taking both out
+    of circulation. `variant` follows Oligomer's convention; engine/
+    selection.py deliberately only ever forms same-variant duplexes (see
+    that module's docstring for why cross-hybridization isn't modeled)."""
 
-    __slots__ = ()
+    __slots__ = ("variant",)
+
+    def __init__(self, variant: str | None = None):
+        self.variant = variant
 
     def canonical_id(self) -> str:
-        return "duplex"
+        return "duplex" + (f"-{self.variant}" if self.variant else "")
 
     def formula(self) -> str:
-        return "(Nmp)6:(Nmp)6 duplex"
+        base = "(Nmp)6:(Nmp)6 duplex"
+        return f"{base} [{self.variant}]" if self.variant else base
 
     @property
     def n_carbon(self) -> int:
@@ -139,13 +154,13 @@ class Duplex:
         return []
 
     def __eq__(self, other):
-        return isinstance(other, Duplex)
+        return isinstance(other, Duplex) and other.variant == self.variant
 
     def __hash__(self):
-        return hash("duplex")
+        return hash(("duplex", self.variant))
 
     def __repr__(self):
-        return "Molecule(duplex)"
+        return f"Molecule({self.formula()})"
 
 
 FRAGMENT = Oligomer(3)

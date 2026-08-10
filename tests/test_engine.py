@@ -43,10 +43,13 @@ from engine.polymer import (
     DUPLEX,
     FRAGMENT,
     TEMPLATE,
+    Duplex,
+    Oligomer,
     PolymerParams,
     build_polymer_reactions,
     run_polymer,
 )
+from engine.selection import SelectionParams, build_selection_reactions, run_selection
 
 
 def check(label, cond):
@@ -877,6 +880,136 @@ def test_polymer_duplex_formation_causes_self_inhibition():
           abs(equiv_on - equiv_off) <= 5)
 
 
+def test_selection_reaction_structure():
+    reactions_no_mut = build_selection_reactions(SelectionParams(
+        variants=("A", "B"), k_template={"A": 1.0, "B": 1.0}, k_mutation=0.0,
+    ))
+    kinds_no_mut = {r.kind for r in reactions_no_mut}
+    check("with mutation off, no mutation reactions are generated at all",
+          "mutation" not in kinds_no_mut)
+    check("5 reaction kinds per variant x 2 variants = 10 reactions with mutation off",
+          len(reactions_no_mut) == 10)
+
+    reactions_mut = build_selection_reactions(SelectionParams(
+        variants=("A", "B"), k_template={"A": 1.0, "B": 1.0}, k_mutation=0.5,
+    ))
+    mutation_reactions = [r for r in reactions_mut if r.kind == "mutation"]
+    check("with mutation on, one mutation reaction exists per ordered (v, w) pair, v != w",
+          len(mutation_reactions) == 2)
+    check("mutation reaction for A->B consumes 2 FRAGMENT-A + 1 TEMPLATE-A",
+          sorted(next(r.reactant_ids for r in mutation_reactions if r.key.endswith("A->template-A+template-B")))
+          == sorted((Oligomer(3, "A").canonical_id(), Oligomer(3, "A").canonical_id(), Oligomer(6, "A").canonical_id())))
+    check("mutation reaction for A->B produces TEMPLATE-A (regenerated) + TEMPLATE-B (the mutant)",
+          next(r.products for r in mutation_reactions if r.key.endswith("A->template-A+template-B"))
+          == (Oligomer(6, "A"), Oligomer(6, "B")))
+
+    reactions_3var = build_selection_reactions(SelectionParams(
+        variants=("A", "B", "C"), k_template={"A": 1.0, "B": 1.0, "C": 1.0}, k_mutation=0.5,
+    ))
+    check("with 3 variants and mutation on, 6 ordered mutation pairs exist (3 * 2)",
+          len([r for r in reactions_3var if r.kind == "mutation"]) == 6)
+
+
+def test_selection_mass_conservation():
+    """Same technique as polymer.py's conservation test, extended across a
+    shared RIBONUCLEOTIDE pool and 2 competing variants: every reaction,
+    including mutation (which reallocates units between variants but
+    creates or destroys none), is a pure reorganization of
+    ribonucleotide-equivalent units."""
+    params = SelectionParams(
+        variants=("A", "B"), k_oligomerize=0.01, k_background=0.01,
+        k_template={"A": 1.0, "B": 2.0}, k_duplex=0.3, k_melt=0.05, k_mutation=0.1,
+        t_max=200.0, max_events=300_000, sample_every=500, seed=5,
+    )
+    initial_ribo = 3000
+    result = run_selection(params, {RIBONUCLEOTIDE.canonical_id(): initial_ribo,
+                                     Oligomer(6, "A").canonical_id(): 2})
+    initial_units = initial_ribo + 2 * 6
+
+    for snap in result.history_counts:
+        total = snap.get(RIBONUCLEOTIDE.canonical_id(), 0)
+        for v in params.variants:
+            total += snap.get(Oligomer(3, v).canonical_id(), 0) * 3
+            total += snap.get(Oligomer(6, v).canonical_id(), 0) * 6
+            total += snap.get(Duplex(v).canonical_id(), 0) * 12
+        check(f"ribonucleotide-unit total conserved across variants at every sampled point "
+              f"(got {total}, want {initial_units})", total == initial_units)
+    print(f"  -> conserved at {len(result.history_counts)} sampled points, final state: {result.counts}")
+
+
+def test_selection_mutation_is_required_for_unseeded_variant_to_appear():
+    """With k_background=0, the ONLY way a variant that was never seeded can
+    come into existence at all is a mutation event off an existing
+    different variant's copying. This is the control this module's central
+    experiment depends on."""
+
+    def run(k_mutation, seed):
+        params = SelectionParams(
+            variants=("A", "B"), k_oligomerize=0.0005, k_background=0.0,
+            k_template={"A": 1.0, "B": 10.0}, k_duplex=0.0, k_melt=0.0, k_mutation=k_mutation,
+            t_max=400.0, max_events=600_000, sample_every=1000, seed=seed,
+        )
+        init = {RIBONUCLEOTIDE.canonical_id(): 20000, Oligomer(6, "A").canonical_id(): 2}
+        return run_selection(params, init)
+
+    for seed in (1, 2, 3):
+        result = run(0.0, seed)
+        check(f"with mutation off (seed={seed}), never-seeded variant B stays exactly 0",
+              result.counts.get(Oligomer(6, "B").canonical_id(), 0) == 0)
+
+    result_mut = run(0.05, 1)
+    b_count = result_mut.counts.get(Oligomer(6, "B").canonical_id(), 0)
+    print(f"  -> mutation on: variant B (never seeded) reached {b_count}")
+    check("with mutation on, variant B appears despite never being seeded", b_count > 0)
+
+
+def test_selection_fitter_variant_wins_direct_competition():
+    """The cleanest isolation of fitness: both variants pre-seeded with
+    identical fragment/template stock (no oligomerization/background, so
+    no shared-resource or emergence-timing confound), differing only in
+    k_template. Compared mid-transient (both are still actively growing,
+    not yet saturated against their shared fixed fragment ceiling -- given
+    infinite time both would fully consume their own stock regardless of
+    rate, the same lesson polymer.py's own acceleration test needed)."""
+    params = SelectionParams(
+        variants=("A", "B"), k_oligomerize=0.0, k_background=0.0,
+        k_template={"A": 0.0003, "B": 0.0009}, k_duplex=0.0, k_melt=0.0, k_mutation=0.0,
+        t_max=0.25, max_events=300_000, sample_every=200, seed=1,
+    )
+    init = {
+        Oligomer(3, "A").canonical_id(): 200, Oligomer(3, "B").canonical_id(): 200,
+        Oligomer(6, "A").canonical_id(): 2, Oligomer(6, "B").canonical_id(): 2,
+    }
+    result = run_selection(params, init)
+    a = result.counts.get(Oligomer(6, "A").canonical_id(), 0)
+    b = result.counts.get(Oligomer(6, "B").canonical_id(), 0)
+    print(f"  -> equal starting stock, 3x k_template: A={a} B={b}")
+    check("the 3x-faster-templating variant pulls decisively ahead from identical starting conditions",
+          b > a * 2)
+
+
+def test_selection_fitter_mutant_overtakes_established_lineage():
+    """The capstone experiment: variant B is never seeded (only exists if
+    mutation creates it from A's copying), starts at a strict timing
+    disadvantage, but is 10x fitter. Does it not only appear but actually
+    overtake the already-established, pre-seeded variant A by the time the
+    shared food supply runs out?"""
+    params = SelectionParams(
+        variants=("A", "B"), k_oligomerize=0.0005, k_background=0.0,
+        k_template={"A": 1.0, "B": 10.0}, k_duplex=0.0, k_melt=0.0, k_mutation=0.05,
+        t_max=400.0, max_events=600_000, sample_every=1000, seed=1,
+    )
+    init = {RIBONUCLEOTIDE.canonical_id(): 20000, Oligomer(6, "A").canonical_id(): 2}
+    result = run_selection(params, init)
+    a = result.counts.get(Oligomer(6, "A").canonical_id(), 0)
+    b = result.counts.get(Oligomer(6, "B").canonical_id(), 0)
+    print(f"  -> A (seeded from the start): {a}   B (arose only via mutation): {b}")
+    check("B actually exists (mutation successfully introduced it)", b > 0)
+    check("the fitter variant, despite starting from zero and arising later, overtakes "
+          "the established lineage by the time the shared food supply is exhausted",
+          b > a)
+
+
 if __name__ == "__main__":
     test_molecule_formulas()
     test_radicalization_and_combination()
@@ -908,4 +1041,9 @@ if __name__ == "__main__":
     test_polymer_mass_conservation()
     test_polymer_templating_accelerates_strand_formation()
     test_polymer_duplex_formation_causes_self_inhibition()
+    test_selection_reaction_structure()
+    test_selection_mass_conservation()
+    test_selection_mutation_is_required_for_unseeded_variant_to_appear()
+    test_selection_fitter_variant_wins_direct_competition()
+    test_selection_fitter_mutant_overtakes_established_lineage()
     print("\nAll sanity checks passed.")

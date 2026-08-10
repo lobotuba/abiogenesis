@@ -1,6 +1,6 @@
 # Abiogenesis: from methane photolysis to autocatalytic networks
 
-A stochastic chemistry simulator exploring six linked questions:
+A stochastic chemistry simulator exploring seven linked questions:
 
 1. Starting from UV photolysis of methane (CH4 + hv -> CH3• + H•), and
    letting the resulting radical chemistry grow in complexity on its own,
@@ -39,6 +39,15 @@ A stochastic chemistry simulator exploring six linked questions:
    the same chemistry that lets it copy itself also cap how far that can
    go? (See the Polymerization section below -- the real answer is
    famous, and it's not the one "autocatalysis" makes it sound like.)
+7. Make the founding question literal: given two heritable replicator
+   sequences competing for the same finite food supply, does the
+   faster-copying one actually win -- and can that faster variant even
+   *arise* from copying error in the first place, rather than being
+   seeded in from outside? This needs all three ingredients Darwinian
+   selection actually requires (heritable variation, a way for copying to
+   produce that variation, and differential survival under a shared
+   constraint) at once, for the first time in this project. (See the
+   Selection section below.)
 
 This is a toy model, not a calibrated photochemistry code. It's built to
 let you see the *shape* of emergent chemical networks and the *qualitative*
@@ -491,12 +500,91 @@ finally something strand-like to copy, is: yes, template-directed
 self-amplification is real and measurable here -- but it is not
 unconditional. The same mechanism that enables it structurally caps it.
 
-**Not modeled**: explicit sequence/base-pairing (FRAGMENT and TEMPLATE are
-tracked only by length, the same abstraction nucleotide.py uses), a
+**Not modeled here**: explicit sequence/base-pairing (FRAGMENT and TEMPLATE
+are tracked only by length, the same abstraction nucleotide.py uses), a
 mismatch/error-rate model for copying fidelity, and anything past a single
-self-complementary replicator -- competing or cooperating strand
-populations, which is where the interesting Darwinian-selection questions
-about replicators actually live (see Roadmap).
+self-complementary replicator. Those three gaps are exactly what the
+Selection section below adds.
+
+## Selection: does a faster replicator actually win?
+
+This is the founding question of the whole project, made literal at last.
+Darwinian selection strictly needs three ingredients at once: (1)
+**heritable variation** -- more than one distinguishable replicating type,
+(2) a copying process that can **produce** that variation from an existing
+type (mutation), and (3) **differential survival/reproduction** under a
+shared constraint. `engine/selection.py` adds all three on top of
+polymer.py's already-tested chemistry, at the same "generic species, no
+explicit base sequence" abstraction level formose.py and nucleotide.py use
+for their diastereomers -- named variant tags ("A", "B") stand in for
+distinct heritable sequences.
+
+**The reaction network**, per named variant, reusing `Oligomer`/`Duplex`
+from `engine/polymer.py` (both extended with an optional `variant` tag,
+backward-compatible -- `None` preserves polymer.py's original single-
+species ids exactly):
+
+1. Oligomerization and background ligation (3 RIBONUCLEOTIDE -> FRAGMENT_v,
+   FRAGMENT_v + FRAGMENT_v -> TEMPLATE_v) use the SAME rate constants for
+   every variant -- deliberately unbiased, so every lineage has equal, fair
+   access to the shared food supply. This is what makes it a genuine
+   competition rather than a rigged one.
+2. **Templated ligation is where fitness actually lives**: FRAGMENT_v +
+   FRAGMENT_v + TEMPLATE_v -> 2 TEMPLATE_v, at each variant's OWN rate.
+   This is the one place a "better" sequence is allowed to matter, matching
+   the real biophysical claim: fitness differences between self-replicators
+   come from how well each one catalyzes its own copying, not from how
+   easily its raw material forms.
+3. Duplex formation/melting, same self-inhibition mechanism as
+   polymer.py, shared across variants. Deliberately no cross-variant
+   duplexes (TEMPLATE_A + TEMPLATE_B -> hybrid) -- the simplifying
+   assumption that distinct heritable sequences are different enough not to
+   cross-hybridize, the same role sequence *specificity* plays in real
+   template-directed replication.
+4. **Mutation** (off by default): during templated ligation, an existing
+   TEMPLATE_v occasionally produces a TEMPLATE_w of a *different* tracked
+   variant instead of a faithful copy of itself. This is the actual source
+   of heritable variation the Polymerization section's own "not modeled"
+   note flagged as missing: with mutation on (and background ligation off,
+   for a clean comparison -- otherwise undirected background chemistry
+   could also independently stumble into forming any variant from scratch),
+   a variant that was never seeded can still appear purely through
+   imperfect copying of an existing one.
+
+**What we found, tested directly**:
+
+- *Direct competition* (both variants pre-seeded with identical stock, no
+  shared-resource confound): giving one variant 3x the templated-ligation
+  rate of the other, from identical starting conditions, produced a
+  decisive lead (46 vs 8 in one test,
+  `test_selection_fitter_variant_wins_direct_competition`) mid-transient --
+  measured before either exhausted its fixed fragment stock, since (same
+  lesson as polymer.py's own acceleration test) given infinite time both
+  eventually fully convert their own stock regardless of rate.
+- *The control*: with variant B never seeded and mutation off, B stayed at
+  **exactly 0** across every seed tested -- confirmed there is no hidden
+  backdoor for it to appear
+  (`test_selection_mutation_is_required_for_unseeded_variant_to_appear`).
+- *The capstone result*: seed only variant A, give a never-seeded variant B
+  a 10x higher templated-ligation rate, and turn mutation on. In one test
+  run, B -- which starts at a strict double disadvantage (doesn't exist yet,
+  and can only appear once a mutation event happens to fire) -- not only
+  came into existence (via 101 mutation events) but **overtook** the
+  already-established, pre-seeded variant A by the time the shared
+  ribonucleotide supply ran out (1729 vs 1606,
+  `test_selection_fitter_mutant_overtakes_established_lineage`), robust
+  across every seed checked during calibration. This is the literal minimal
+  signature of Darwinian selection this whole project set out to test for:
+  a heritable variant that arose from copying error alone, and then won,
+  because it was fitter -- not because it was seeded, not because it was
+  favored by an external rule, just because it copied itself faster than
+  its competitor given the same shared, finite resource.
+
+**Not modeled**: real nucleotide-level sequences (still just named tags,
+not base-pairing geometry), more than a handful of competing variants at
+once, cooperation between distinct replicators (hypercycles), and spatial
+structure (well-mixed only, so there's no way for a locally-successful
+variant to outrun diffusion into a shared global pool) -- see Roadmap.
 
 ## Chain length: what actually drives longer hydrocarbons?
 
@@ -626,16 +714,17 @@ chemistry back down about as fast as photochemistry can make it.
   `engine/autocatalysis.py` are chain-*propagation* loops (a radical
   carrier gets regenerated), which is real and relevant but a weaker claim
   than "autocatalytic set" in the Kauffman sense.
-- **Heredity, partially.** `engine/polymer.py` now has genuine
-  template-directed replication (see Polymerization section above) -- but
-  it's a single self-complementary replicator species with no explicit
-  sequence, so there's no *variation* for selection to act on yet: nothing
-  here can currently represent two different replicator "genotypes"
-  competing, or copying with occasional error. This model can now show a
-  template being copied faster than background chemistry alone, and being
-  self-limited by its own product -- but not yet differential survival
-  *between distinct heritable variants*, which is what "Darwinian" strictly
-  requires. See Roadmap item 3.
+- **Heredity, now with variation and selection -- but still not real
+  sequences.** `engine/polymer.py` has genuine template-directed
+  replication, and `engine/selection.py` adds heritable variation (named
+  variant tags), mutation (copying error that introduces a variant that was
+  never seeded), and demonstrated differential survival under a shared
+  resource constraint (see Selection section above) -- the literal minimal
+  ingredients Darwinian selection requires. What's still missing: variant
+  tags aren't real base sequences (no explicit A/U/G/C, no mismatch/binding
+  geometry), only a couple of variants are tracked at once (not an open-
+  ended population), and there's no cooperation between distinct
+  replicators (hypercycles). See Roadmap item 3.
 - **Rates are relative, not physical.** Don't read absolute timescales or
   yields as predictions about real methane/atmosphere photochemistry.
   Concentration *ratios* and which pathway dominates are the meaningful
@@ -682,21 +771,23 @@ Roughly in order of how directly each one advances the actual question:
    at C3) are the natural next steps. The bigger structural alternative,
    sidestepping free-ribose synthesis entirely, is now built -- see the
    Nucleotide pathway section above.
-3. **Beyond the activated ribonucleotide -- now built, and revealing the
-   next question.** `engine/polymer.py` polymerizes the activated
+3. **Beyond the activated ribonucleotide, and beyond a single replicator --
+   both now built.** `engine/polymer.py` polymerizes the activated
    ribonucleotide into a self-complementary, template-copying strand
-   (modeled on von Kiedrowski's 1986 minimal self-replicator -- see
-   Polymerization section above), which is where this project's two
-   central questions -- self-amplifying networks (item 1's original goal)
-   and a plausible route to ribose -- finally met. What it doesn't have
-   yet, and what's now the most direct remaining path to "Darwinian" in
-   the literal sense: explicit sequence (not just strand length), a
-   copying-fidelity/error-rate model (the actual source of heritable
-   *variation*), and populations of multiple, distinct replicator
-   sequences that can compete or cooperate -- so a real question like "does
-   a faster-copying variant outcompete a slower one" becomes something this
-   model could actually test, rather than something only one replicator
-   species exists to ask about.
+   (von Kiedrowski's 1986 minimal self-replicator), and `engine/
+   selection.py` adds heritable variation (named variant tags), mutation
+   (copying error that can introduce a variant that was never seeded), and
+   tested differential survival under a shared resource constraint (see
+   Polymerization and Selection sections above). This is where this
+   project's two founding questions -- self-amplifying networks (item 1's
+   original goal) and a plausible route to ribose -- finally met, and where
+   "Darwinian" stopped being a stretch and became literal: a fitter,
+   never-seeded variant was shown to emerge from copying error alone and
+   overtake an established competitor. What's still missing, and is now
+   the most direct remaining path forward: real base-level sequences (not
+   just named tags), an open-ended population of variants instead of a
+   handful, and cooperation between distinct replicators (hypercycles) --
+   see the Selection section's own "Not modeled" note.
 4. **Nitrile / HCN chemistry.** The real Miller-Urey route to amino acid
    precursors goes through HCN and related nitriles, not just amines --
    this model's nitrogen chemistry stops one step short of that.
@@ -732,6 +823,11 @@ engine/
                          self-complementary, template-copying strand (von Kiedrowski
                          1986 minimal self-replicator; imports RIBONUCLEOTIDE from
                          nucleotide.py)
+  selection.py            separate module: adds heritable variant tags, mutation
+                         (copying error), and tested differential survival on top of
+                         polymer.py's chemistry (imports Oligomer/Duplex from
+                         polymer.py, RIBONUCLEOTIDE from nucleotide.py) -- the literal
+                         minimal Darwinian-selection test
 app.py                Streamlit UI
 tests/test_engine.py  sanity checks (no pytest dependency)
 ```
