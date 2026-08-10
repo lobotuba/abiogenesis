@@ -50,6 +50,7 @@ from engine.polymer import (
     run_polymer,
 )
 from engine.selection import SelectionParams, build_selection_reactions, run_selection
+from engine.hypercycle import HypercycleParams, build_hypercycle_reactions, run_hypercycle
 
 
 def check(label, cond):
@@ -1010,6 +1011,90 @@ def test_selection_fitter_mutant_overtakes_established_lineage():
           b > a)
 
 
+def test_hypercycle_reaction_structure():
+    variants = ("A", "B", "C")
+    reactions_closed = build_hypercycle_reactions(HypercycleParams(variants=variants, closed=True, k_cross=1.0))
+    reactions_open = build_hypercycle_reactions(HypercycleParams(variants=variants, closed=False, k_cross=1.0))
+
+    cross_closed = [r for r in reactions_closed if r.kind == "cross_catalyzed_ligation"]
+    cross_open = [r for r in reactions_open if r.kind == "cross_catalyzed_ligation"]
+    check("a closed 3-member cycle has 3 cross-catalysis edges (A->B, B->C, C->A)", len(cross_closed) == 3)
+    check("an open 3-member chain has only 2 cross-catalysis edges (A->B, B->C, no C->A)", len(cross_open) == 2)
+    check("closing the loop adds exactly one reaction (the wraparound edge) and nothing else",
+          len(reactions_closed) == len(reactions_open) + 1)
+
+    wraparound_key = "cross_catalyzed_ligation:2fragment-A+template-C->template-C+template-A"
+    check("the wraparound edge (C catalyzes A) exists when closed", any(r.key == wraparound_key for r in reactions_closed))
+    check("the wraparound edge does not exist when open", not any(r.key == wraparound_key for r in reactions_open))
+
+    a_to_b = next(r for r in reactions_closed if r.key == "cross_catalyzed_ligation:2fragment-B+template-A->template-A+template-B")
+    check("A catalyzing B's replication consumes 2 FRAGMENT-B + 1 TEMPLATE-A",
+          sorted(a_to_b.reactant_ids) == sorted((Oligomer(3, "B").canonical_id(), Oligomer(3, "B").canonical_id(), Oligomer(6, "A").canonical_id())))
+    check("A catalyzing B's replication regenerates TEMPLATE-A (catalyst) and produces TEMPLATE-B",
+          a_to_b.products == (Oligomer(6, "A"), Oligomer(6, "B")))
+
+
+def test_hypercycle_mass_conservation():
+    variants = ("A", "B", "C")
+    params = HypercycleParams(
+        variants=variants, closed=True, k_oligomerize=0.01, k_background=0.01,
+        k_self={"A": 0.5}, k_cross=0.3, k_duplex=0.2, k_melt=0.05,
+        t_max=200.0, max_events=300_000, sample_every=500, seed=5,
+    )
+    initial_ribo = 3000
+    init = {RIBONUCLEOTIDE.canonical_id(): initial_ribo}
+    for v in variants:
+        init[Oligomer(6, v).canonical_id()] = 2
+    result = run_hypercycle(params, init)
+    initial_units = initial_ribo + len(variants) * 2 * 6
+
+    for snap in result.history_counts:
+        total = snap.get(RIBONUCLEOTIDE.canonical_id(), 0)
+        for v in variants:
+            total += snap.get(Oligomer(3, v).canonical_id(), 0) * 3
+            total += snap.get(Oligomer(6, v).canonical_id(), 0) * 6
+            total += snap.get(Duplex(v).canonical_id(), 0) * 12
+        check(f"ribonucleotide-unit total conserved across the cycle at every sampled point "
+              f"(got {total}, want {initial_units})", total == initial_units)
+    print(f"  -> conserved at {len(result.history_counts)} sampled points, final state: {result.counts}")
+
+
+def test_hypercycle_closing_the_loop_lets_an_unhelped_member_grow():
+    """The central experiment: with every member unable to replicate alone
+    (k_self all 0) and background ligation off (so a TEMPLATE's count can
+    ONLY change by being produced as a reaction product), variant A has no
+    possible way to grow in an open chain (A->B->C, nothing points to A) --
+    its count is mathematically pinned at its seed value. Closing the loop
+    (C->A) is the only structural change; does it actually let A grow?"""
+    variants = ("A", "B", "C")
+
+    def run(closed, seed):
+        params = HypercycleParams(
+            variants=variants, closed=closed, k_oligomerize=0.001, k_background=0.0,
+            k_self={}, k_cross=0.001, k_duplex=0.0, k_melt=0.0,
+            t_max=500.0, max_events=400_000, sample_every=1000, seed=seed,
+        )
+        init = {RIBONUCLEOTIDE.canonical_id(): 20000}
+        for v in variants:
+            init[Oligomer(6, v).canonical_id()] = 5
+        return run_hypercycle(params, init)
+
+    for seed in (1, 2, 3):
+        result_open = run(False, seed)
+        a_open = result_open.counts.get(Oligomer(6, "A").canonical_id(), 0)
+        check(f"open chain (seed={seed}): variant A, which nothing catalyzes, stays exactly at its seed value",
+              a_open == 5)
+
+    result_closed = run(True, 1)
+    a_closed = result_closed.counts.get(Oligomer(6, "A").canonical_id(), 0)
+    b_closed = result_closed.counts.get(Oligomer(6, "B").canonical_id(), 0)
+    c_closed = result_closed.counts.get(Oligomer(6, "C").canonical_id(), 0)
+    print(f"  -> open chain: A stays at seed value (5)")
+    print(f"  -> closed cycle: A={a_closed} B={b_closed} C={c_closed}")
+    check("closing the loop lets A -- which the open chain could never help -- grow far past its seed value",
+          a_closed > 100)
+
+
 if __name__ == "__main__":
     test_molecule_formulas()
     test_radicalization_and_combination()
@@ -1046,4 +1131,7 @@ if __name__ == "__main__":
     test_selection_mutation_is_required_for_unseeded_variant_to_appear()
     test_selection_fitter_variant_wins_direct_competition()
     test_selection_fitter_mutant_overtakes_established_lineage()
+    test_hypercycle_reaction_structure()
+    test_hypercycle_mass_conservation()
+    test_hypercycle_closing_the_loop_lets_an_unhelped_member_grow()
     print("\nAll sanity checks passed.")

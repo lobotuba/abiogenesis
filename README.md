@@ -1,6 +1,6 @@
 # Abiogenesis: from methane photolysis to autocatalytic networks
 
-A stochastic chemistry simulator exploring seven linked questions:
+A stochastic chemistry simulator exploring eight linked questions:
 
 1. Starting from UV photolysis of methane (CH4 + hv -> CH3• + H•), and
    letting the resulting radical chemistry grow in complexity on its own,
@@ -48,6 +48,12 @@ A stochastic chemistry simulator exploring seven linked questions:
    produce that variation, and differential survival under a shared
    constraint) at once, for the first time in this project. (See the
    Selection section below.)
+8. Ask the opposite question: instead of competing, what if replicators
+   **cooperate**? In a closed loop where each one catalyzes replication of
+   the *next* one (Eigen & Schuster's hypercycle), can members too weak to
+   replicate on their own persist and grow anyway -- purely because the
+   loop is closed? (See the Hypercycle section below -- the test is about
+   as sharp as a stochastic model can give.)
 
 This is a toy model, not a calibrated photochemistry code. It's built to
 let you see the *shape* of emergent chemical networks and the *qualitative*
@@ -580,11 +586,78 @@ species ids exactly):
   favored by an external rule, just because it copied itself faster than
   its competitor given the same shared, finite resource.
 
-**Not modeled**: real nucleotide-level sequences (still just named tags,
-not base-pairing geometry), more than a handful of competing variants at
-once, cooperation between distinct replicators (hypercycles), and spatial
-structure (well-mixed only, so there's no way for a locally-successful
-variant to outrun diffusion into a shared global pool) -- see Roadmap.
+**Not modeled here**: real nucleotide-level sequences (still just named
+tags, not base-pairing geometry), more than a handful of competing
+variants at once, cooperation between distinct replicators (hypercycles --
+see the next section, which adds exactly that), and spatial structure
+(well-mixed only, so there's no way for a locally-successful variant to
+outrun diffusion into a shared global pool) -- see Roadmap.
+
+## Hypercycle: does cooperation let the weak survive?
+
+Selection (above) is replicators *competing*, each relying entirely on its
+own copying ability. `engine/hypercycle.py` builds the other classic
+arrangement from origin-of-life theory: Eigen & Schuster's **hypercycle**
+(Eigen, *Naturwissenschaften*, 1971; Eigen & Schuster, *The Hypercycle: A
+Principle of Natural Self-Organization*, 1979) -- a closed loop of
+replicators where each one catalyzes replication of the *next* one in the
+cycle, not itself. The classic point of a hypercycle is that it lets
+replicators too weak to sustain themselves alone persist and grow *only
+because the loop is closed*.
+
+**The reaction network**, per named variant at position `i` in a list of
+variants, reusing `Oligomer`/`Duplex` from `engine/polymer.py` exactly like
+`engine/selection.py` does:
+
+1. Oligomerization and background ligation, shared/unbiased across
+   variants -- same as selection.py.
+2. **Self-templated ligation, deliberately off for every member by
+   default** (`k_self`, per variant, defaults to 0.0): the classic
+   hypercycle setup studies replicators that are individually *too weak to
+   be self-sufficient*, so whatever growth happens has to come from
+   cooperation, not solo copying.
+3. **Cross-catalyzed ligation, the actual hypercycle step**: variant `v`'s
+   TEMPLATE catalyzes ligation of the *next* variant's own fragments into a
+   new copy of that neighbor (FRAGMENT_next + FRAGMENT_next + TEMPLATE_v ->
+   TEMPLATE_v + TEMPLATE_next) -- structurally the same three-reactant
+   reaction shape as `templated_ligation` (self-copying, polymer.py) and
+   `mutation` (error-copying, selection.py), just pointed at a neighbor
+   instead of at itself or at random.
+4. Duplex formation/melting, same self-inhibition mechanism as the other
+   replicator modules, shared across variants.
+
+A `closed` flag controls whether the *last* variant's cross-catalyzed
+reaction wraps back around to the *first* variant (a true closed loop,
+A -> B -> C -> A) or is simply omitted (an open chain, A -> B -> C, where
+nothing on Earth ever catalyzes A). This one flag is the entire experiment:
+same species, same rates, same everything else -- does closing that one
+edge change what the system can do?
+
+**What we found, tested directly**: with every member's self-templating
+rate at 0 (nobody can replicate alone) and background ligation also at 0
+(so a TEMPLATE's count can only ever change by being produced as a
+reaction *product*), variant A in an open 3-member chain is not just
+"slower to grow" -- it is **mathematically incapable of changing at all**,
+since no reaction in the whole open-chain network has it as a product.
+Tested directly across every seed tried
+(`test_hypercycle_closing_the_loop_lets_an_unhelped_member_grow`): open
+chain, A stays at *exactly* its seeded value (5) every single time.
+Closing the loop is the only structural change, and in one test run it let
+A grow to 1135 -- right alongside B (1107) and C (1105), all three rising
+together, none of them capable of doing it alone. This is about as sharp a
+result as a stochastic model can produce: not "closing the loop helps," but
+"closing the loop is the *only* way this particular growth can happen at
+all." Mass conservation holds throughout
+(`test_hypercycle_mass_conservation`), confirming the loop is redistributing
+a shared, finite ribonucleotide supply among all three members, not
+creating material from nowhere.
+
+**Not modeled**: more than a simple ring topology (real hypercycle theory
+also studies branched and higher-connectivity networks), parasites (a
+"cheater" species that gets catalyzed by the cycle but doesn't catalyze
+anyone in return -- the classic hypercycle *vulnerability*, not just its
+strength), and, same as Selection above, real base-level sequences and
+spatial structure.
 
 ## Chain length: what actually drives longer hydrocarbons?
 
@@ -714,17 +787,19 @@ chemistry back down about as fast as photochemistry can make it.
   `engine/autocatalysis.py` are chain-*propagation* loops (a radical
   carrier gets regenerated), which is real and relevant but a weaker claim
   than "autocatalytic set" in the Kauffman sense.
-- **Heredity, now with variation and selection -- but still not real
+- **Heredity, competition, and cooperation -- but still not real
   sequences.** `engine/polymer.py` has genuine template-directed
-  replication, and `engine/selection.py` adds heritable variation (named
-  variant tags), mutation (copying error that introduces a variant that was
-  never seeded), and demonstrated differential survival under a shared
-  resource constraint (see Selection section above) -- the literal minimal
-  ingredients Darwinian selection requires. What's still missing: variant
-  tags aren't real base sequences (no explicit A/U/G/C, no mismatch/binding
-  geometry), only a couple of variants are tracked at once (not an open-
-  ended population), and there's no cooperation between distinct
-  replicators (hypercycles). See Roadmap item 3.
+  replication, `engine/selection.py` adds heritable variation, mutation,
+  and demonstrated differential survival under a shared resource
+  constraint, and `engine/hypercycle.py` adds cooperative cross-catalysis
+  (replicators too weak to sustain themselves alone, persisting only
+  because a loop is closed) -- see the Selection and Hypercycle sections
+  above. What's still missing: variant tags aren't real base sequences (no
+  explicit A/U/G/C, no mismatch/binding geometry), only a handful of
+  variants are tracked at once (not an open-ended population), and there's
+  no "cheater" species that exploits a hypercycle without contributing to
+  it -- the classic hypercycle vulnerability, not just its strength. See
+  Roadmap item 3.
 - **Rates are relative, not physical.** Don't read absolute timescales or
   yields as predictions about real methane/atmosphere photochemistry.
   Concentration *ratios* and which pathway dominates are the meaningful
@@ -771,23 +846,27 @@ Roughly in order of how directly each one advances the actual question:
    at C3) are the natural next steps. The bigger structural alternative,
    sidestepping free-ribose synthesis entirely, is now built -- see the
    Nucleotide pathway section above.
-3. **Beyond the activated ribonucleotide, and beyond a single replicator --
-   both now built.** `engine/polymer.py` polymerizes the activated
-   ribonucleotide into a self-complementary, template-copying strand
-   (von Kiedrowski's 1986 minimal self-replicator), and `engine/
-   selection.py` adds heritable variation (named variant tags), mutation
-   (copying error that can introduce a variant that was never seeded), and
-   tested differential survival under a shared resource constraint (see
-   Polymerization and Selection sections above). This is where this
-   project's two founding questions -- self-amplifying networks (item 1's
-   original goal) and a plausible route to ribose -- finally met, and where
-   "Darwinian" stopped being a stretch and became literal: a fitter,
-   never-seeded variant was shown to emerge from copying error alone and
-   overtake an established competitor. What's still missing, and is now
-   the most direct remaining path forward: real base-level sequences (not
-   just named tags), an open-ended population of variants instead of a
-   handful, and cooperation between distinct replicators (hypercycles) --
-   see the Selection section's own "Not modeled" note.
+3. **Beyond the activated ribonucleotide, competition, and cooperation --
+   all three now built.** `engine/polymer.py` polymerizes the activated
+   ribonucleotide into a self-complementary, template-copying strand (von
+   Kiedrowski's 1986 minimal self-replicator); `engine/selection.py` adds
+   heritable variation, mutation, and tested differential survival under a
+   shared resource constraint; `engine/hypercycle.py` adds cooperative
+   cross-catalysis, showing replicators too weak to sustain themselves
+   alone can persist and grow together purely because a loop is closed
+   (see Polymerization, Selection, and Hypercycle sections above). This is
+   where this project's two founding questions -- self-amplifying networks
+   (item 1's original goal) and a plausible route to ribose -- finally met,
+   and where "Darwinian" stopped being a stretch and became literal: a
+   fitter, never-seeded variant was shown to emerge from copying error
+   alone and overtake an established competitor, and a closed cooperative
+   loop was shown to be the *only* way a particular member could grow at
+   all. What's still missing, and is now the most direct remaining path
+   forward: real base-level sequences (not just named tags), an open-ended
+   population of variants instead of a handful, and a "cheater" species
+   that exploits a hypercycle without contributing to it -- the classic
+   vulnerability of cooperation, and a natural place for this project's two
+   modes (competition and cooperation) to finally interact directly.
 4. **Nitrile / HCN chemistry.** The real Miller-Urey route to amino acid
    precursors goes through HCN and related nitriles, not just amines --
    this model's nitrogen chemistry stops one step short of that.
@@ -828,6 +907,11 @@ engine/
                          polymer.py's chemistry (imports Oligomer/Duplex from
                          polymer.py, RIBONUCLEOTIDE from nucleotide.py) -- the literal
                          minimal Darwinian-selection test
+  hypercycle.py           separate module: cross-catalytic closed-loop cooperation
+                         between distinct replicators (Eigen and Schuster's hypercycle;
+                         imports Oligomer/Duplex from polymer.py, RIBONUCLEOTIDE from
+                         nucleotide.py) -- tests whether a closed loop lets replicators
+                         too weak to self-sustain persist and grow together
 app.py                Streamlit UI
 tests/test_engine.py  sanity checks (no pytest dependency)
 ```

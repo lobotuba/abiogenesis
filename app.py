@@ -27,6 +27,7 @@ from engine.nucleotide import (
 )
 from engine.polymer import DUPLEX, FRAGMENT, TEMPLATE, Duplex, Oligomer, PolymerParams, run_polymer
 from engine.selection import SelectionParams, run_selection
+from engine.hypercycle import HypercycleParams, run_hypercycle
 from engine.simulator import SimParams, Simulator
 
 st.set_page_config(page_title="Abiogenesis: hydrocarbon photochemistry", layout="wide")
@@ -1192,5 +1193,136 @@ if "sel_result" in st.session_state:
             "Both variants draw on the same shared, finite ribonucleotide supply through an equally-"
             "rated oligomerization step -- the only place either variant is allowed an edge is its own "
             "k_template. This bar chart is the most direct answer to 'which one actually won.'"
+        )
+
+# -- Hypercycle: cooperation instead of competition ---------------------------
+st.divider()
+st.header("Hypercycle: does cooperation let the weak survive?")
+st.caption(
+    "Selection (above) is replicators competing, each relying only on itself. Eigen & Schuster's "
+    "hypercycle (1971/1979) is the opposite arrangement: a closed loop of replicators where each one "
+    "catalyzes replication of the NEXT one in the cycle, not its own. With every member's own "
+    "self-replication rate at 0 -- none of them can sustain themselves alone -- does closing the loop "
+    "let all of them grow together anyway? Concretely: in an open chain A -> B -> C, nothing on Earth "
+    "can ever make more A (nothing points to it), so its count is mathematically pinned at whatever it "
+    "started with. Closing the loop (C -> A) is the only structural change. Does A actually grow?"
+)
+
+hc1, hc2 = st.columns(2)
+with hc1:
+    hypercycle_ribonucleotide = st.slider("Starting shared ribonucleotide supply", 2000, 40000, 20000, step=1000, key="hc_ribo")
+    hc_closed = st.radio(
+        "Cycle topology", ["Closed loop (A -> B -> C -> A)", "Open chain (A -> B -> C, nothing helps A)"],
+        index=0,
+    ) == "Closed loop (A -> B -> C -> A)"
+    seed_each = st.slider("Seed TEMPLATE for A, B, and C (equal start)", 1, 50, 5, step=1)
+    k_oligomerize_hc = st.slider("3 ribonucleotide -> fragment, shared (k_oligomerize)", 0.0, 0.01, 0.001, step=0.0005, format="%.4f")
+with hc2:
+    k_cross_hc = st.slider(
+        "Cross-catalysis rate: each member copying its neighbor (k_cross)", 0.0, 0.01, 0.001, step=0.0005, format="%.4f",
+        help="The one rate that makes the cycle work at all -- every member catalyzes the NEXT one, "
+             "never itself (self-replication is fixed at 0 for this experiment, on purpose).",
+    )
+    k_duplex_hc = st.slider("Template + template -> duplex, shared (k_duplex)", 0.0, 5.0, 0.0, step=0.1, key="hc_duplex")
+    k_melt_hc = st.slider("Duplex -> 2 template, shared (k_melt)", 0.0, 2.0, 0.0, step=0.05, key="hc_melt")
+    hypercycle_t_max = st.slider("Hypercycle: simulated time", 5.0, 1000.0, 500.0, step=5.0)
+    hypercycle_seed = st.number_input("Hypercycle: random seed", value=1, step=1)
+
+run_hypercycle_clicked = st.button("Run hypercycle simulation", use_container_width=True)
+
+if run_hypercycle_clicked:
+    hc_variants = ("A", "B", "C")
+    hc_params = HypercycleParams(
+        variants=hc_variants, closed=hc_closed, k_oligomerize=k_oligomerize_hc, k_background=0.0,
+        k_self={}, k_cross=k_cross_hc, k_duplex=k_duplex_hc, k_melt=k_melt_hc,
+        t_max=hypercycle_t_max, max_events=400_000, sample_every=1000, seed=int(hypercycle_seed),
+    )
+    hc_init = {RIBONUCLEOTIDE.canonical_id(): hypercycle_ribonucleotide}
+    for v in hc_variants:
+        hc_init[Oligomer(6, v).canonical_id()] = seed_each
+    with st.spinner("Running hypercycle simulation..."):
+        hc_result = run_hypercycle(hc_params, hc_init)
+    st.session_state["hc_result"] = hc_result
+    st.session_state["hc_params"] = hc_params
+    st.session_state["hc_seed_each"] = seed_each
+
+if "hc_result" in st.session_state:
+    hresult = st.session_state["hc_result"]
+    hparams = st.session_state["hc_params"]
+    hseed_each = st.session_state["hc_seed_each"]
+    hc_variants = hparams.variants
+
+    equiv_by_variant = {}
+    for v in hc_variants:
+        active = hresult.counts.get(Oligomer(6, v).canonical_id(), 0)
+        duplex = hresult.counts.get(Duplex(v).canonical_id(), 0)
+        equiv_by_variant[v] = active + 2 * duplex
+
+    h1, h2, h3 = st.columns(3)
+    h1.metric(f"Variant A (started at {hseed_each})", equiv_by_variant["A"])
+    h2.metric(f"Variant B (started at {hseed_each})", equiv_by_variant["B"])
+    h3.metric(f"Variant C (started at {hseed_each})", equiv_by_variant["C"])
+
+    a_grew = equiv_by_variant["A"] > hseed_each
+    if hparams.closed and a_grew:
+        st.success(
+            f"**The loop is closed, and it worked**: variant A grew from {hseed_each} to "
+            f"{equiv_by_variant['A']} -- the only thing that can ever produce more A is C's "
+            "cross-catalysis, so this growth is entirely a product of the cycle being closed. None of "
+            "these three replicators can sustain themselves alone (self-replication is off for all of "
+            "them); the closed loop lets all three grow together anyway."
+        )
+    elif hparams.closed and not a_grew:
+        st.info(
+            f"**Loop is closed, but A hasn't grown yet** ({equiv_by_variant['A']} vs seed "
+            f"{hseed_each}) -- the loop needs at least one full trip around to reach A (C has to "
+            "accumulate first). Try more simulated time or a higher k_cross."
+        )
+    elif not hparams.closed and not a_grew:
+        st.warning(
+            f"**Open chain, as expected**: variant A is stuck at exactly its seed value "
+            f"({equiv_by_variant['A']}) -- nothing in an open chain ever catalyzes it, so it "
+            "mathematically cannot grow. Switch to the closed loop above and re-run with the same "
+            "rates to see the only thing that changes."
+        )
+    else:
+        st.error(
+            f"Unexpected: variant A grew ({equiv_by_variant['A']} vs seed {hseed_each}) in the open "
+            "chain -- this shouldn't happen (nothing should be able to produce more A here)."
+        )
+
+    htab_pop, htab_bar = st.tabs(["Population over time", "A, B, C (template-equivalent)"])
+
+    with htab_pop:
+        peak = {}
+        for snap in hresult.history_counts:
+            for sid, n in snap.items():
+                peak[sid] = max(peak.get(sid, 0), n)
+        top_ids = sorted(peak, key=peak.get, reverse=True)[:10]
+        rows = []
+        for t, snap in zip(hresult.history_t, hresult.history_counts):
+            for sid in top_ids:
+                rows.append({"t": t, "species": hresult.species[sid].formula(), "count": snap.get(sid, 0)})
+        hdf = pd.DataFrame(rows)
+        fig9 = go.Figure()
+        for formula, sub in hdf.groupby("species"):
+            fig9.add_trace(go.Scatter(x=sub["t"], y=sub["count"], mode="lines", name=formula))
+        fig9.update_layout(
+            yaxis_title="molecule count", xaxis_title="time (arbitrary units)",
+            yaxis_type="log", height=450, legend_title="species (top 10 by peak count)",
+        )
+        st.plotly_chart(fig9, use_container_width=True)
+
+    with htab_bar:
+        fig10 = go.Figure(go.Bar(
+            x=list(hc_variants), y=[equiv_by_variant[v] for v in hc_variants],
+            marker_color=["#636EFA", "#00CC96", "#EF553B"],
+        ))
+        fig10.add_hline(y=hseed_each, line_dash="dash", annotation_text="starting seed value")
+        fig10.update_layout(yaxis_title="template-equivalent units (active + 2 x duplex)", height=420)
+        st.plotly_chart(fig10, use_container_width=True)
+        st.caption(
+            "The dashed line is where every variant started. In the open chain, A can never rise "
+            "above it -- nothing produces more of it. In the closed loop, all three can rise together."
         )
 
