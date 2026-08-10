@@ -52,6 +52,35 @@ grow? This is about as sharp a test as a stochastic model can give: in the
 open-chain case the very first variant's count is not just "slower to
 grow," it is mathematically incapable of changing at all, since no
 reaction in the whole network has it as a product.
+
+**Parasites** (`parasite`/`parasite_catalyst`/`k_parasite`, off by default):
+a hypercycle's classic, real vulnerability isn't an outside attacker -- it's
+a species that gets catalyzed by an existing member but never catalyzes
+anyone in return. `parasite_catalyst`'s TEMPLATE can spend a catalytic turn
+on the legitimate next member (`cross_catalyzed_ligation`, which keeps the
+cycle going) or on the parasite (`parasite_catalyzed_ligation`, a dead end
+for the cycle but not for the parasite itself).
+
+**What testing this actually found, which was not the first guess**: the
+naive prediction was "a more efficient parasite (higher `k_parasite`) is
+more dangerous." Tested directly across a 2000x range of `k_parasite`
+(0.001 to 2.0), that's false -- the legitimate cycle's total output barely
+moves. What actually matters is just whether the parasite *exists* at all:
+because the parasite runs its own `oligomerization` reaction against the
+SAME shared, finite RIBONUCLEOTIDE pool the legitimate members draw from,
+it claims a share of the food supply the moment it's added, independent of
+how fast (or whether) that claimed material ever gets converted onward --
+the same "given enough simulated time, final extent stops depending on
+rate" principle this project ran into with polymer.py and selection.py,
+showing up a third time in a new context. And a direct comparison settles
+whether a parasite is actually *worse* than an equally hungry legitimate
+competitor: total output (legitimate members + parasite combined) is
+essentially identical whether that 4th claimant is a true parasite or a
+fully legitimate 4th cycle member closing a 4-membered loop -- a parasite
+doesn't steal MORE than a cooperator would. The real damage is that
+whatever it claims is then **entirely wasted** from the cycle's point of
+view, instead of continuing to work for the system the way a legitimate
+member's share would. See `test_hypercycle_parasite_*` for the numbers.
 """
 from __future__ import annotations
 
@@ -80,6 +109,11 @@ class HypercycleParams:
                                       # NEXT variant's own fragments into a new copy of that neighbor
     k_duplex: float = 0.0
     k_melt: float = 0.0
+    parasite: str | None = None          # name of a parasite variant; None (default) means no
+                                           # parasite species/reactions exist at all
+    parasite_catalyst: str | None = None  # which existing member's TEMPLATE catalyzes the parasite
+    k_parasite: float = 0.0               # rate of that catalysis -- 0.0 means inert even if
+                                           # `parasite` is set (present but not yet dangerous)
     t_max: float = 500.0
     max_events: int = 200_000
     sample_every: int = 25
@@ -135,6 +169,44 @@ def build_hypercycle_reactions(p: HypercycleParams) -> list[Reaction]:
                 key=f"cross_catalyzed_ligation:2fragment-{w}+template-{v}->template-{v}+template-{w}",
             ))
 
+    if p.parasite is not None and p.parasite_catalyst is not None:
+        pv = p.parasite
+        fragment_p = Oligomer(3, pv)
+        template_p = Oligomer(6, pv)
+        fid_p, tid_p = fragment_p.canonical_id(), template_p.canonical_id()
+        tid_catalyst = Oligomer(6, p.parasite_catalyst).canonical_id()
+
+        out.append(Reaction(
+            kind="oligomerization", reactant_ids=(rid, rid, rid), products=(fragment_p,),
+            rate_constant=p.k_oligomerize, weight=1.0,
+            key=f"oligomerization:3ribonucleotide->fragment-{pv}",
+        ))
+        out.append(Reaction(
+            kind="background_ligation", reactant_ids=(fid_p, fid_p), products=(template_p,),
+            rate_constant=p.k_background, weight=1.0,
+            key=f"background_ligation:2fragment-{pv}->template-{pv}",
+        ))
+        out.append(Reaction(
+            kind="duplex_formation", reactant_ids=(tid_p, tid_p), products=(Duplex(pv),),
+            rate_constant=p.k_duplex, weight=1.0,
+            key=f"duplex_formation:2template-{pv}->duplex-{pv}",
+        ))
+        out.append(Reaction(
+            kind="duplex_melting", reactant_ids=(Duplex(pv).canonical_id(),),
+            products=(template_p, template_p), rate_constant=p.k_melt, weight=1.0,
+            key=f"duplex_melting:duplex-{pv}->2template-{pv}",
+        ))
+        # Deliberately no self_templated_ligation and no outgoing cross_catalyzed_ligation for
+        # the parasite -- it can only ever be a PRODUCT, never a catalyst. That asymmetry is the
+        # entire definition of a parasite here.
+        out.append(Reaction(
+            kind="parasite_catalyzed_ligation",
+            reactant_ids=(fid_p, fid_p, tid_catalyst),
+            products=(Oligomer(6, p.parasite_catalyst), template_p), rate_constant=p.k_parasite, weight=1.0,
+            key=f"parasite_catalyzed_ligation:2fragment-{pv}+template-{p.parasite_catalyst}"
+                f"->template-{p.parasite_catalyst}+template-{pv}",
+        ))
+
     return out
 
 
@@ -149,6 +221,9 @@ def run_hypercycle(p: HypercycleParams, initial_counts: dict[str, int]) -> SimRe
     species: dict[str, Species] = {RIBONUCLEOTIDE.canonical_id(): RIBONUCLEOTIDE}
     for v in p.variants:
         for sp in (Oligomer(3, v), Oligomer(6, v), Duplex(v)):
+            species[sp.canonical_id()] = sp
+    if p.parasite is not None and p.parasite_catalyst is not None:
+        for sp in (Oligomer(3, p.parasite), Oligomer(6, p.parasite), Duplex(p.parasite)):
             species[sp.canonical_id()] = sp
 
     counts = {sid: 0 for sid in species}

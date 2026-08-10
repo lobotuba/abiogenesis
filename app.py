@@ -1207,6 +1207,14 @@ st.caption(
     "can ever make more A (nothing points to it), so its count is mathematically pinned at whatever it "
     "started with. Closing the loop (C -> A) is the only structural change. Does A actually grow?"
 )
+st.caption(
+    "Optionally add a **parasite**: a species that gets catalyzed by A but never catalyzes anyone "
+    "back -- the hypercycle's real, classic vulnerability. Testing found something not obvious in "
+    "advance: how *efficient* the parasite is (k_parasite) barely matters -- what costs the cycle is "
+    "just the parasite existing at all, since it draws on the same shared food supply. And a parasite "
+    "doesn't claim more than an honest 4th cycle member would; it just wastes what it claims instead "
+    "of that share continuing to work for the cycle."
+)
 
 hc1, hc2 = st.columns(2)
 with hc1:
@@ -1228,6 +1236,21 @@ with hc2:
     hypercycle_t_max = st.slider("Hypercycle: simulated time", 5.0, 1000.0, 500.0, step=5.0)
     hypercycle_seed = st.number_input("Hypercycle: random seed", value=1, step=1)
 
+hc_enable_parasite = st.checkbox("Add a parasite (catalyzed by A, catalyzes nothing back)", value=False)
+if hc_enable_parasite:
+    hpc1, hpc2 = st.columns(2)
+    with hpc1:
+        hc_parasite_catalyst = st.selectbox("Which member catalyzes the parasite?", ["A", "B", "C"], index=0)
+    with hpc2:
+        k_parasite_hc = st.slider(
+            "Parasite catalysis rate (k_parasite)", 0.0, 3.0, 0.5, step=0.05,
+            help="Try sweeping this widely -- testing found the legitimate cycle's output barely "
+                 "depends on this value, which was not the naive expectation.",
+        )
+else:
+    hc_parasite_catalyst = None
+    k_parasite_hc = 0.0
+
 run_hypercycle_clicked = st.button("Run hypercycle simulation", use_container_width=True)
 
 if run_hypercycle_clicked:
@@ -1235,6 +1258,8 @@ if run_hypercycle_clicked:
     hc_params = HypercycleParams(
         variants=hc_variants, closed=hc_closed, k_oligomerize=k_oligomerize_hc, k_background=0.0,
         k_self={}, k_cross=k_cross_hc, k_duplex=k_duplex_hc, k_melt=k_melt_hc,
+        parasite=("P" if hc_enable_parasite else None), parasite_catalyst=hc_parasite_catalyst,
+        k_parasite=k_parasite_hc,
         t_max=hypercycle_t_max, max_events=400_000, sample_every=1000, seed=int(hypercycle_seed),
     )
     hc_init = {RIBONUCLEOTIDE.canonical_id(): hypercycle_ribonucleotide}
@@ -1258,10 +1283,22 @@ if "hc_result" in st.session_state:
         duplex = hresult.counts.get(Duplex(v).canonical_id(), 0)
         equiv_by_variant[v] = active + 2 * duplex
 
-    h1, h2, h3 = st.columns(3)
+    has_parasite = hparams.parasite is not None
+    if has_parasite:
+        parasite_active = hresult.counts.get(Oligomer(6, hparams.parasite).canonical_id(), 0)
+        parasite_duplex = hresult.counts.get(Duplex(hparams.parasite).canonical_id(), 0)
+        equiv_by_variant[hparams.parasite] = parasite_active + 2 * parasite_duplex
+
+    if has_parasite:
+        h1, h2, h3, h4 = st.columns(4)
+    else:
+        h1, h2, h3 = st.columns(3)
     h1.metric(f"Variant A (started at {hseed_each})", equiv_by_variant["A"])
     h2.metric(f"Variant B (started at {hseed_each})", equiv_by_variant["B"])
     h3.metric(f"Variant C (started at {hseed_each})", equiv_by_variant["C"])
+    if has_parasite:
+        h4.metric(f"Parasite {hparams.parasite} (catalyzed by {hparams.parasite_catalyst}, gives nothing back)",
+                   equiv_by_variant[hparams.parasite])
 
     a_grew = equiv_by_variant["A"] > hseed_each
     if hparams.closed and a_grew:
@@ -1291,6 +1328,16 @@ if "hc_result" in st.session_state:
             "chain -- this shouldn't happen (nothing should be able to produce more A here)."
         )
 
+    if has_parasite:
+        legit_total = sum(equiv_by_variant[v] for v in hc_variants)
+        st.warning(
+            f"**Parasite present**: {hparams.parasite} accumulated {equiv_by_variant[hparams.parasite]} "
+            f"units while giving nothing back to the cycle, against a combined legitimate total of "
+            f"{legit_total} across A, B, and C. Try turning k_parasite up or down a lot -- the "
+            "legitimate total barely moves either way, which was the actual (not the assumed) finding "
+            "here: the parasite's mere existence, not its catalytic efficiency, is what costs the cycle."
+        )
+
     htab_pop, htab_bar = st.tabs(["Population over time", "A, B, C (template-equivalent)"])
 
     with htab_pop:
@@ -1314,15 +1361,18 @@ if "hc_result" in st.session_state:
         st.plotly_chart(fig9, use_container_width=True)
 
     with htab_bar:
+        bar_names = list(hc_variants) + ([hparams.parasite] if has_parasite else [])
+        bar_colors = ["#636EFA", "#00CC96", "#EF553B"] + (["#AB63FA"] if has_parasite else [])
         fig10 = go.Figure(go.Bar(
-            x=list(hc_variants), y=[equiv_by_variant[v] for v in hc_variants],
-            marker_color=["#636EFA", "#00CC96", "#EF553B"],
+            x=bar_names, y=[equiv_by_variant[v] for v in bar_names],
+            marker_color=bar_colors,
         ))
         fig10.add_hline(y=hseed_each, line_dash="dash", annotation_text="starting seed value")
         fig10.update_layout(yaxis_title="template-equivalent units (active + 2 x duplex)", height=420)
         st.plotly_chart(fig10, use_container_width=True)
         st.caption(
             "The dashed line is where every variant started. In the open chain, A can never rise "
-            "above it -- nothing produces more of it. In the closed loop, all three can rise together."
+            "above it -- nothing produces more of it. In the closed loop, all three can rise together. "
+            "The parasite bar (if shown, purple) grew without ever contributing back to the cycle."
         )
 

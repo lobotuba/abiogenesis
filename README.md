@@ -52,8 +52,11 @@ A stochastic chemistry simulator exploring eight linked questions:
    **cooperate**? In a closed loop where each one catalyzes replication of
    the *next* one (Eigen & Schuster's hypercycle), can members too weak to
    replicate on their own persist and grow anyway -- purely because the
-   loop is closed? (See the Hypercycle section below -- the test is about
-   as sharp as a stochastic model can give.)
+   loop is closed? And does the hypercycle's real, classic vulnerability --
+   a "parasite" that gets catalyzed but never catalyzes back -- actually
+   behave the way the naive intuition predicts? (See the Hypercycle section
+   below -- the test is about as sharp as a stochastic model can give, and
+   the parasite result wasn't the first guess.)
 
 This is a toy model, not a calibrated photochemistry code. It's built to
 let you see the *shape* of emergent chemical networks and the *qualitative*
@@ -652,12 +655,50 @@ all." Mass conservation holds throughout
 a shared, finite ribonucleotide supply among all three members, not
 creating material from nowhere.
 
+### Parasites: the hypercycle's classic vulnerability
+
+A hypercycle's real weakness isn't an outside attacker -- it's a "cheater"
+species that gets catalyzed by an existing member but never catalyzes
+anyone in return. `parasite`/`parasite_catalyst`/`k_parasite` (off by
+default) add exactly one such species: `parasite_catalyst`'s TEMPLATE can
+spend a catalytic turn on the legitimate next member (keeps the cycle
+going) or on the parasite (a dead end for the cycle, not for the parasite).
+
+**What we found, tested directly -- and it wasn't the first guess.** The
+naive prediction was "a more efficient parasite (higher `k_parasite`) is
+more dangerous." Tested across a 2000x range of `k_parasite` (0.001 to
+2.0), that's false: the legitimate cycle's combined output barely moved
+(2507-2520 across the whole range, vs. 3347 with no parasite at all --
+`test_hypercycle_parasite_costs_the_cycle_regardless_of_virulence`). What
+actually matters is just whether the parasite *exists*: it runs its own
+`oligomerization` reaction against the same shared, finite RIBONUCLEOTIDE
+pool the legitimate members draw from, and claims a share of the food
+supply the moment it's added -- independent of how fast that claimed
+material ever gets converted onward. This is the same "given enough
+simulated time, final extent stops depending on rate" principle this
+project ran into with polymer.py's and selection.py's own tests, showing
+up a third time in a new context.
+
+A fairer, sharper question: is a parasite actually *worse* than an equally
+hungry legitimate competitor? Tested directly
+(`test_hypercycle_parasite_wastes_resources_a_legitimate_member_would_have_used`):
+total output (3 legitimate members + parasite) came out to 3346-3348 across
+seeds -- essentially identical to a fully legitimate 4-membered closed
+cycle's total (3352). A parasite doesn't claim *more* resource than a
+cooperator would. The real damage is that whatever it claims is then
+**entirely wasted** from the cycle's perspective (legitimate-only output:
+~2483-2526, roughly 75% of the 4-member-cycle's total) instead of
+continuing to work for the system the way a genuine 4th member's share
+would have.
+
 **Not modeled**: more than a simple ring topology (real hypercycle theory
-also studies branched and higher-connectivity networks), parasites (a
-"cheater" species that gets catalyzed by the cycle but doesn't catalyze
-anyone in return -- the classic hypercycle *vulnerability*, not just its
-strength), and, same as Selection above, real base-level sequences and
-spatial structure.
+also studies branched and higher-connectivity networks), a parasite that
+also preys on more than one member at once, and, same as Selection above,
+real base-level sequences and spatial structure -- spatial structure in
+particular is the natural next step, since group selection among
+compartments (a "bad" vesicle full of parasites growing/dividing slower
+than a "clean" one) is the accepted real-world resolution to exactly this
+vulnerability.
 
 ## Chain length: what actually drives longer hydrocarbons?
 
@@ -787,19 +828,19 @@ chemistry back down about as fast as photochemistry can make it.
   `engine/autocatalysis.py` are chain-*propagation* loops (a radical
   carrier gets regenerated), which is real and relevant but a weaker claim
   than "autocatalytic set" in the Kauffman sense.
-- **Heredity, competition, and cooperation -- but still not real
-  sequences.** `engine/polymer.py` has genuine template-directed
+- **Heredity, competition, cooperation, and its exploitation -- but still
+  not real sequences.** `engine/polymer.py` has genuine template-directed
   replication, `engine/selection.py` adds heritable variation, mutation,
   and demonstrated differential survival under a shared resource
   constraint, and `engine/hypercycle.py` adds cooperative cross-catalysis
-  (replicators too weak to sustain themselves alone, persisting only
-  because a loop is closed) -- see the Selection and Hypercycle sections
-  above. What's still missing: variant tags aren't real base sequences (no
-  explicit A/U/G/C, no mismatch/binding geometry), only a handful of
-  variants are tracked at once (not an open-ended population), and there's
-  no "cheater" species that exploits a hypercycle without contributing to
-  it -- the classic hypercycle vulnerability, not just its strength. See
-  Roadmap item 3.
+  plus an optional parasite that exploits it -- see the Selection and
+  Hypercycle sections above. What's still missing: variant tags aren't
+  real base sequences (no explicit A/U/G/C, no mismatch/binding geometry),
+  only a handful of variants are tracked at once (not an open-ended
+  population), a parasite can only prey on one member at a time, and there
+  is no spatial structure -- which the Hypercycle section's own findings
+  point to directly as the accepted real-world fix for the parasite
+  vulnerability (group selection among compartments). See Roadmap item 3.
 - **Rates are relative, not physical.** Don't read absolute timescales or
   yields as predictions about real methane/atmosphere photochemistry.
   Concentration *ratios* and which pathway dominates are the meaningful
@@ -846,27 +887,30 @@ Roughly in order of how directly each one advances the actual question:
    at C3) are the natural next steps. The bigger structural alternative,
    sidestepping free-ribose synthesis entirely, is now built -- see the
    Nucleotide pathway section above.
-3. **Beyond the activated ribonucleotide, competition, and cooperation --
-   all three now built.** `engine/polymer.py` polymerizes the activated
-   ribonucleotide into a self-complementary, template-copying strand (von
-   Kiedrowski's 1986 minimal self-replicator); `engine/selection.py` adds
-   heritable variation, mutation, and tested differential survival under a
-   shared resource constraint; `engine/hypercycle.py` adds cooperative
-   cross-catalysis, showing replicators too weak to sustain themselves
-   alone can persist and grow together purely because a loop is closed
-   (see Polymerization, Selection, and Hypercycle sections above). This is
-   where this project's two founding questions -- self-amplifying networks
-   (item 1's original goal) and a plausible route to ribose -- finally met,
-   and where "Darwinian" stopped being a stretch and became literal: a
-   fitter, never-seeded variant was shown to emerge from copying error
-   alone and overtake an established competitor, and a closed cooperative
-   loop was shown to be the *only* way a particular member could grow at
-   all. What's still missing, and is now the most direct remaining path
-   forward: real base-level sequences (not just named tags), an open-ended
-   population of variants instead of a handful, and a "cheater" species
-   that exploits a hypercycle without contributing to it -- the classic
-   vulnerability of cooperation, and a natural place for this project's two
-   modes (competition and cooperation) to finally interact directly.
+3. **Beyond the activated ribonucleotide, competition, cooperation, and its
+   exploitation -- all now built.** `engine/polymer.py` polymerizes the
+   activated ribonucleotide into a self-complementary, template-copying
+   strand (von Kiedrowski's 1986 minimal self-replicator); `engine/
+   selection.py` adds heritable variation, mutation, and tested
+   differential survival under a shared resource constraint; `engine/
+   hypercycle.py` adds cooperative cross-catalysis (replicators too weak to
+   sustain themselves alone, persisting only because a loop is closed) plus
+   an optional parasite that exploits it (see Polymerization, Selection,
+   and Hypercycle sections above). This is where this project's two
+   founding questions -- self-amplifying networks (item 1's original goal)
+   and a plausible route to ribose -- finally met, and where "Darwinian"
+   stopped being a stretch and became literal: a fitter, never-seeded
+   variant was shown to emerge from copying error alone and overtake an
+   established competitor, a closed cooperative loop was shown to be the
+   *only* way a particular member could grow at all, and a parasite was
+   shown to cost the cycle a share of its food supply regardless of how
+   efficient it is -- not the naively assumed result. What's still missing,
+   and is now the most direct remaining path forward: real base-level
+   sequences (not just named tags), an open-ended population of variants
+   instead of a handful, and spatial structure -- the Hypercycle section's
+   own findings point to compartmentalization/group selection as the
+   accepted real-world fix for exactly the parasite vulnerability just
+   demonstrated, making it the natural next build (see Roadmap item 8).
 4. **Nitrile / HCN chemistry.** The real Miller-Urey route to amino acid
    precursors goes through HCN and related nitriles, not just amines --
    this model's nitrogen chemistry stops one step short of that.
@@ -882,7 +926,11 @@ Roughly in order of how directly each one advances the actual question:
 8. **Spatial structure.** Compartments or surfaces that let useful
    combinations of molecules stay together instead of diluting into a
    well-mixed soup. Also where altitude-dependent escape/UV physics would
-   belong, if the wet-planet question above needs to get more realistic.
+   belong, if the wet-planet question above needs to get more realistic --
+   and, per the Hypercycle section's parasite findings, the natural fix for
+   the parasite vulnerability itself: group selection among compartments,
+   where a vesicle overrun by parasites simply grows/divides slower than a
+   clean one, rather than every replicator sharing one global pool.
 
 ## Project layout
 

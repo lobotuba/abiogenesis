@@ -1095,6 +1095,140 @@ def test_hypercycle_closing_the_loop_lets_an_unhelped_member_grow():
           a_closed > 100)
 
 
+def test_hypercycle_parasite_reaction_structure():
+    variants = ("A", "B", "C")
+    reactions_no_parasite = build_hypercycle_reactions(HypercycleParams(variants=variants, closed=True, k_cross=1.0))
+    reactions_with_parasite = build_hypercycle_reactions(HypercycleParams(
+        variants=variants, closed=True, k_cross=1.0, parasite="P", parasite_catalyst="A", k_parasite=0.5,
+    ))
+    check("with no parasite configured, no parasite-related reactions or species show up at all",
+          not any("-P" in r.key for r in reactions_no_parasite))
+    check("setting parasite adds exactly 5 new reactions (oligomerization, background_ligation, "
+          "duplex_formation, duplex_melting, parasite_catalyzed_ligation)",
+          len(reactions_with_parasite) == len(reactions_no_parasite) + 5)
+
+    parasite_lig = next(r for r in reactions_with_parasite if r.kind == "parasite_catalyzed_ligation")
+    check("parasite_catalyzed_ligation consumes 2 FRAGMENT-P + 1 TEMPLATE-A (the catalyst)",
+          sorted(parasite_lig.reactant_ids) == sorted((Oligomer(3, "P").canonical_id(), Oligomer(3, "P").canonical_id(), Oligomer(6, "A").canonical_id())))
+    check("parasite_catalyzed_ligation regenerates TEMPLATE-A and produces TEMPLATE-P",
+          parasite_lig.products == (Oligomer(6, "A"), Oligomer(6, "P")))
+    check("the parasite has NO outgoing cross_catalyzed_ligation reaction of its own (it can only be a product)",
+          not any(r.kind == "cross_catalyzed_ligation" and r.reactant_ids[-1] == Oligomer(6, "P").canonical_id()
+                  for r in reactions_with_parasite))
+    check("the parasite gets NO self_templated_ligation reaction either (it cannot replicate itself)",
+          not any(r.kind == "self_templated_ligation" and "P" in r.key for r in reactions_with_parasite))
+
+
+def test_hypercycle_parasite_mass_conservation():
+    variants = ("A", "B", "C")
+    params = HypercycleParams(
+        variants=variants, closed=True, k_oligomerize=0.01, k_background=0.01,
+        k_self={"A": 0.3}, k_cross=0.3, k_duplex=0.2, k_melt=0.05,
+        parasite="P", parasite_catalyst="A", k_parasite=0.3,
+        t_max=200.0, max_events=300_000, sample_every=500, seed=5,
+    )
+    initial_ribo = 3000
+    init = {RIBONUCLEOTIDE.canonical_id(): initial_ribo}
+    for v in variants:
+        init[Oligomer(6, v).canonical_id()] = 2
+    result = run_hypercycle(params, init)
+    initial_units = initial_ribo + len(variants) * 2 * 6
+
+    all_names = list(variants) + ["P"]
+    for snap in result.history_counts:
+        total = snap.get(RIBONUCLEOTIDE.canonical_id(), 0)
+        for v in all_names:
+            total += snap.get(Oligomer(3, v).canonical_id(), 0) * 3
+            total += snap.get(Oligomer(6, v).canonical_id(), 0) * 6
+            total += snap.get(Duplex(v).canonical_id(), 0) * 12
+        check(f"ribonucleotide-unit total conserved with parasite active at every sampled point "
+              f"(got {total}, want {initial_units})", total == initial_units)
+    print(f"  -> conserved at {len(result.history_counts)} sampled points, final state: {result.counts}")
+
+
+def test_hypercycle_parasite_costs_the_cycle_regardless_of_virulence():
+    """The actual (not the naively assumed) finding: the parasite's mere
+    existence costs the legitimate cycle a share of the shared food supply
+    -- but how EFFICIENT it is at converting that share (k_parasite) barely
+    matters, because at full resource exhaustion final extent stops
+    depending on rate (the same principle polymer.py's and selection.py's
+    own tests ran into, in a new context)."""
+    variants = ("A", "B", "C")
+
+    def legit_total(parasite, k_parasite, seed):
+        params = HypercycleParams(
+            variants=variants, closed=True, k_oligomerize=0.001, k_background=0.0,
+            k_self={}, k_cross=0.001, k_duplex=0.0, k_melt=0.0,
+            parasite=parasite, parasite_catalyst="A" if parasite else None, k_parasite=k_parasite,
+            t_max=500.0, max_events=400_000, sample_every=1000, seed=seed,
+        )
+        init = {RIBONUCLEOTIDE.canonical_id(): 20000}
+        for v in variants:
+            init[Oligomer(6, v).canonical_id()] = 5
+        result = run_hypercycle(params, init)
+        return sum(result.counts.get(Oligomer(6, v).canonical_id(), 0) for v in variants)
+
+    no_parasite = legit_total(None, 0.0, seed=1)
+    with_parasite = [legit_total("P", k, seed=1) for k in (0.001, 0.02, 0.5, 2.0)]
+    print(f"  -> no parasite: legit total={no_parasite}")
+    print(f"  -> with parasite, k_parasite in (0.001, 0.02, 0.5, 2.0): legit totals={with_parasite}")
+
+    check("a parasite's mere presence costs the legitimate cycle a substantial share of output",
+          all(v < no_parasite * 0.85 for v in with_parasite))
+    check("but that cost barely depends on how virulent (efficient) the parasite is -- "
+          "the spread across a 2000x k_parasite range is small",
+          max(with_parasite) - min(with_parasite) < no_parasite * 0.05)
+
+
+def test_hypercycle_parasite_wastes_resources_a_legitimate_member_would_have_used():
+    """The sharper, fairer comparison: is a parasite actually WORSE than an
+    equally hungry legitimate competitor? Total output (legitimate members
+    + parasite) should be about the same whether the 4th claimant on the
+    shared food supply is a true parasite or a fully legitimate 4th member
+    closing a real 4-membered loop -- a parasite doesn't claim MORE than a
+    cooperator would. What it does is waste what it claims: legitimate-only
+    output should be substantially lower with a parasite present than with
+    a legitimate 4th member in its place."""
+
+    def run_with_parasite(seed):
+        params = HypercycleParams(
+            variants=("A", "B", "C"), closed=True, k_oligomerize=0.001, k_background=0.0,
+            k_self={}, k_cross=0.001, k_duplex=0.0, k_melt=0.0,
+            parasite="P", parasite_catalyst="A", k_parasite=0.5,
+            t_max=500.0, max_events=400_000, sample_every=1000, seed=seed,
+        )
+        init = {RIBONUCLEOTIDE.canonical_id(): 20000}
+        for v in ("A", "B", "C"):
+            init[Oligomer(6, v).canonical_id()] = 5
+        return run_hypercycle(params, init)
+
+    def run_all_legit(seed):
+        params = HypercycleParams(
+            variants=("A", "B", "C", "D"), closed=True, k_oligomerize=0.001, k_background=0.0,
+            k_self={}, k_cross=0.001, k_duplex=0.0, k_melt=0.0,
+            t_max=500.0, max_events=400_000, sample_every=1000, seed=seed,
+        )
+        init = {RIBONUCLEOTIDE.canonical_id(): 20000}
+        for v in ("A", "B", "C", "D"):
+            init[Oligomer(6, v).canonical_id()] = 5
+        return run_hypercycle(params, init)
+
+    for seed in (1, 2, 3):
+        r_parasite = run_with_parasite(seed)
+        r_legit = run_all_legit(seed)
+        legit3 = sum(r_parasite.counts.get(Oligomer(6, v).canonical_id(), 0) for v in ("A", "B", "C"))
+        parasite_count = r_parasite.counts.get(Oligomer(6, "P").canonical_id(), 0)
+        legit4 = sum(r_legit.counts.get(Oligomer(6, v).canonical_id(), 0) for v in ("A", "B", "C", "D"))
+        print(f"  -> seed={seed}: 3-legit+parasite total={legit3 + parasite_count} (legit-only={legit3}); "
+              f"4-legit total={legit4}")
+        check(f"seed={seed}: total claimed resource is about the same either way "
+              f"(parasite doesn't out-compete a legitimate member for raw share)",
+              abs((legit3 + parasite_count) - legit4) < legit4 * 0.05)
+        check(f"seed={seed}: but legitimate-only output is substantially lower with a parasite "
+              f"present than with a legitimate 4th member in its place",
+              legit3 < legit4 * 0.85)
+
+
 if __name__ == "__main__":
     test_molecule_formulas()
     test_radicalization_and_combination()
@@ -1134,4 +1268,8 @@ if __name__ == "__main__":
     test_hypercycle_reaction_structure()
     test_hypercycle_mass_conservation()
     test_hypercycle_closing_the_loop_lets_an_unhelped_member_grow()
+    test_hypercycle_parasite_reaction_structure()
+    test_hypercycle_parasite_mass_conservation()
+    test_hypercycle_parasite_costs_the_cycle_regardless_of_virulence()
+    test_hypercycle_parasite_wastes_resources_a_legitimate_member_would_have_used()
     print("\nAll sanity checks passed.")
